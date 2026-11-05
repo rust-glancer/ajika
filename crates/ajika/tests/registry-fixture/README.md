@@ -9,4 +9,4 @@ cargo nextest run --manifest-path crates/ajika/tests/registry-fixture/Cargo.toml
 cargo nextest run --manifest-path crates/ajika/tests/registry-fixture/Cargo.toml --release
 ```
 
-The release profile enables fat LTO. CI runs this smoke test on its existing native runners.
+The release profile enables fat LTO. CI runs this smoke test on Ubuntu and Windows.
