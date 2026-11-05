@@ -1,5 +1,9 @@
 # Ajika
 
+**Project info:**
+[![Docs.rs](https://docs.rs/ajika/badge.svg)](https://docs.rs/ajika)
+[![Latest Version](https://img.shields.io/crates/v/ajika.svg)](https://crates.io/crates/ajika)
+
 Ajika is a persistent incremental query library.
 
 It lets you define _queries_, which look like (almost) normal Rust functions but remember
