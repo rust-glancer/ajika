@@ -1,0 +1,52 @@
+{
+    "$schema": "https://docs.renovatebot.com/renovate-schema.json",
+    "extends": [
+        "config:recommended",
+        "helpers:pinGitHubActionDigests",
+        ":configMigration"
+    ],
+    "dependencyDashboard": true,
+    "labels": ["dependencies"],
+    "timezone": "UTC",
+    "schedule": ["* 0-5 * * 0"],
+    "updateNotScheduled": false,
+    "prHourlyLimit": 2,
+    "prConcurrentLimit": 5,
+    "minimumReleaseAge": "7 days",
+    "internalChecksFilter": "strict",
+    "prCreation": "not-pending",
+    "rangeStrategy": "bump",
+    "rebaseWhen": "behind-base-branch",
+    // The replay fixture resolves independently and needs lockfile updates too.
+    "lockFileMaintenance": {
+        "enabled": true,
+        "schedule": ["* 0-5 * * 0"],
+        "automerge": false
+    },
+    "packageRules": [
+        {
+            "description": "Group non-major Rust dependencies",
+            "matchManagers": ["cargo"],
+            "matchUpdateTypes": ["minor", "patch"],
+            "groupName": "rust dependencies"
+        },
+        {
+            "description": "Group non-major GitHub Actions updates",
+            "matchManagers": ["github-actions"],
+            "matchUpdateTypes": ["minor", "patch", "pinDigest"],
+            "groupName": "github-actions"
+        },
+        {
+            "description": "Require manual handling for major updates",
+            "matchUpdateTypes": ["major"],
+            "dependencyDashboardApproval": true
+        },
+        {
+            "description": "Automerge only GitHub Action digest pin refreshes",
+            "matchManagers": ["github-actions"],
+            "matchUpdateTypes": ["digest"],
+            "groupName": "github-action digests",
+            "automerge": true
+        }
+    ]
+}

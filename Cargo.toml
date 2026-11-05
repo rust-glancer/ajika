@@ -1,0 +1,60 @@
+[workspace]
+members = [
+  "crates/ajika",
+  "crates/ajika-macros",
+  "crates/ajika-storage",
+  "examples/editor-session",
+  "examples/handbook",
+  "examples/outputs",
+  "examples/persistence",
+  "examples/word-count",
+]
+exclude = ["crates/ajika/tests/registry-fixture"]
+resolver = "3"
+
+[workspace.package]
+version = "0.0.0"
+edition = "2024"
+authors = ["Igor Aleksanov <popzxc@yandex.ru>"]
+license = "MIT OR Apache-2.0"
+repository = "https://github.com/rust-glancer/ajika"
+
+# The shared non-adjacent-impls lint keeps local implementations together.
+# Clippy's multiple_inherent_impl would also reject splitting parsing and emission across modules.
+[workspace.lints.rust]
+unexpected_cfgs = { level = "warn", check-cfg = ['cfg(dylint_lib, values("rust_glancer_lints"))'] }
+
+[workspace.metadata.dylint]
+libraries = [
+  { git = "https://github.com/rust-glancer/rust-glancer-lints", rev = "2334b9b4f866dcd29ab864590301fc01afb544ab", pattern = "crates/rust-glancer-lints" },
+]
+
+[workspace.dependencies]
+ajika = { path = "crates/ajika", version = "0.0.0" }
+ajika_macros = { path = "crates/ajika-macros", version = "0.0.0" }
+ajika_storage = { path = "crates/ajika-storage", version = "0.0.0" }
+
+anyhow = "1.0.103"
+blake3 = "1.8.5"
+getrandom = "0.4.3"
+inventory = "0.3.25"
+lz4_flex = { version = "0.14.0", default-features = false }
+proc-macro2 = "1.0.106"
+quote = "1.0.45"
+redb = "4.4.0"
+syn = "2.0"
+tempfile = "3.27.0"
+tracing = "0.1.44"
+wincode = "0.5.3"
+zstd = { version = "0.14.3", default-features = false }
+
+# Only the handbook application uses these; the library stays independent of its UI.
+clap = "4.6.7"
+notify-debouncer-full = "0.7.0"
+percent-encoding = "2.3.2"
+pulldown-cmark = { version = "0.13.6", default-features = false }
+serde = "1.0"
+serde_json = "1.0"
+tiny_http = { version = "0.12.0", default-features = false }
+url = "2.5.8"
+walkdir = "2.5.0"

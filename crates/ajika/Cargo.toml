@@ -1,0 +1,28 @@
+[package]
+name = "ajika"
+version.workspace = true
+edition.workspace = true
+authors.workspace = true
+license.workspace = true
+repository.workspace = true
+description = "Synchronous incremental queries with scoped residency and persistent storage."
+
+[dependencies]
+ajika_macros.workspace = true
+ajika_storage.workspace = true
+anyhow.workspace = true
+blake3.workspace = true
+getrandom.workspace = true
+inventory.workspace = true
+tracing.workspace = true
+wincode = { workspace = true, features = ["derive"] }
+
+[dev-dependencies]
+tempfile.workspace = true
+
+[[test]]
+name = "runtime"
+path = "tests/runtime/mod.rs"
+
+[lints]
+workspace = true

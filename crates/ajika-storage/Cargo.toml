@@ -1,0 +1,24 @@
+[package]
+name = "ajika_storage"
+version.workspace = true
+edition.workspace = true
+authors.workspace = true
+license.workspace = true
+repository.workspace = true
+description = "Atomic records and packed immutable values for Ajika."
+
+[dependencies]
+anyhow.workspace = true
+blake3.workspace = true
+getrandom.workspace = true
+lz4_flex = { workspace = true, features = ["std", "frame"] }
+redb.workspace = true
+tracing.workspace = true
+wincode = { workspace = true, features = ["derive"] }
+zstd.workspace = true
+
+[dev-dependencies]
+tempfile.workspace = true
+
+[lints]
+workspace = true

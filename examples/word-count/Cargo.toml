@@ -1,0 +1,19 @@
+[package]
+name = "ajika-word-count"
+version.workspace = true
+edition.workspace = true
+authors.workspace = true
+license.workspace = true
+publish = false
+description = "Basic queries and selective recomputation."
+
+[[bin]]
+name = "word-count"
+path = "src/main.rs"
+doc = false
+
+[dependencies]
+ajika.workspace = true
+
+[lints]
+workspace = true

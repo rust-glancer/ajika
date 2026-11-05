@@ -1,0 +1,213 @@
+<!doctype html>
+<html lang="en">
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Handbook · Ajika</title>
+<style>
+  :root { color-scheme: light; font: 15px/1.5 system-ui; color: #292d29; background: #f5f4ef; }
+  * { box-sizing: border-box; }
+  body { margin: 0; }
+  header { padding: 16px 24px; border-bottom: 1px solid #d8dbd2; display: flex; align-items: center; gap: 20px; }
+  h1 { font-size: 21px; margin: 0; } header small { color: #687467; }
+  button { font: inherit; cursor: pointer; border: 1px solid #bbc4b8; border-radius: 5px; padding: 6px 12px; background: white; color: inherit; }
+  button:hover { background: #e8eee4; } button:disabled { opacity: .5; cursor: default; }
+  #build { margin-left: auto; background: #324a37; color: white; }
+  #layout { display: grid; grid-template-columns: 220px minmax(0, 1fr); }
+  nav { padding: 18px 12px; border-right: 1px solid #d8dbd2; }
+  nav button { display: block; width: 100%; text-align: left; border: 0; background: transparent; overflow-wrap: anywhere; margin-bottom: 4px; }
+  nav button[aria-current="page"] { background: #dde7d6; font-weight: 600; }
+  main { min-width: 0; padding: 20px; }
+  #toolbar { display: flex; align-items: center; gap: 8px; margin-bottom: 12px; }
+  #filename { font-weight: 600; margin-right: auto; overflow-wrap: anywhere; }
+  #status { color: #667264; font-size: 13px; }
+  #panes { display: grid; grid-template-columns: 1fr 1fr; gap: 14px; }
+  label, .label { display: block; color: #667264; font-size: 12px; text-transform: uppercase; letter-spacing: .08em; margin-bottom: 5px; }
+  textarea, iframe { width: 100%; height: 52vh; min-height: 300px; border: 1px solid #cdd2c8; border-radius: 5px; background: white; }
+  textarea { resize: vertical; padding: 14px; font: 14px/1.6 ui-monospace, monospace; tab-size: 4; }
+  iframe { display: block; }
+  #message { color: #a42a18; white-space: pre-wrap; }
+  #diagnostics { padding-left: 22px; } #diagnostics button { border: none; background: none; padding: 0; text-align: left; color: #9b381f; }
+  #metrics { padding: 12px 0; font-variant-numeric: tabular-nums; }
+  details { border-top: 1px solid #d8dbd2; padding-top: 10px; } summary { cursor: pointer; }
+  table { width: 100%; border-collapse: collapse; margin-top: 8px; font-size: 13px; }
+  th, td { text-align: left; padding: 4px 8px; border-bottom: 1px solid #e1e3db; }
+  .hint { color: #687467; font-size: 13px; }
+  @media (max-width: 900px) { #layout { grid-template-columns: 1fr; } nav { border: 0; } nav button { width: auto; display: inline-block; } #panes { grid-template-columns: 1fr; } }
+</style>
+<header><h1>Handbook</h1><small>An incremental editor powered by Ajika</small><button id="build">Build handbook</button></header>
+<div id="layout">
+<nav id="pages" aria-label="Documents"></nav>
+<main>
+  <div id="toolbar"><span id="filename">Choose a document</span><span id="status"></span><button id="save">Save</button><button id="discard">Discard</button></div>
+  <div id="panes">
+    <div><label for="editor">Markdown · preview updates as you type</label><textarea id="editor" spellcheck="false" aria-label="Markdown source"></textarea></div>
+    <div><span class="label">Preview</span><iframe id="preview" title="Document preview" sandbox="allow-same-origin"></iframe></div>
+  </div>
+  <p id="message" role="alert"></p>
+  <ul id="diagnostics" aria-label="Link diagnostics"></ul>
+  <div id="metrics" aria-live="polite">Open a document or build the handbook to see the work performed.</div>
+  <details open><summary>Query executions</summary><p class="hint">Reused queries do not execute. Build runs pages in parallel; worker IDs show where computations ran.</p>
+    <table><thead><tr><th>Document</th><th>Computation</th><th>Worker</th></tr></thead><tbody id="executions"></tbody></table>
+  </details>
+  <p class="hint">Try changing a paragraph, renaming “Requirements” in installation.md, or inserting blank lines above a broken link. Saved files are watched; drafts stay in memory until saved.</p>
+</main>
+</div>
+<script>
+const $ = id => document.getElementById(id);
+let state = { generation: -1, pages: [], draft: null };
+let page = '', loadedText = '', editVersion = 0, timer, busy = 0;
+let queue = Promise.resolve();
+const dirty = () => $('editor').value !== loadedText || state.draft === page;
+function showState(next) {
+  if (next.generation < state.generation) return;
+  state = next;
+  $('pages').replaceChildren(...state.pages.map(path => {
+    const button = document.createElement('button');
+    button.textContent = path;
+    if (path === page) button.setAttribute('aria-current', 'page');
+    button.onclick = () => openPage(path).catch(() => {});
+    return button;
+  }));
+  $('filename').textContent = page || 'No documents';
+  $('status').textContent = dirty() ? 'Unsaved draft' : 'Saved';
+  $('save').disabled = $('discard').disabled = !page;
+  $('editor').disabled = !page;
+}
+function showWork(work) {
+  const bytes = value => `${(value / 1024).toFixed(1)} KiB`;
+  $('metrics').textContent = `${work.milliseconds.toFixed(1)} ms · ${work.executed} executed · ${work.validated} validated · ${work.decoded} decoded · ${bytes(work.bytes_written)} payload + ${bytes(work.metadata_bytes_written)} metadata written · ${bytes(work.session_bytes)} session`;
+  $('executions').replaceChildren(...work.executions.slice(0, 200).map(event => {
+    const row = document.createElement('tr');
+    for (const value of [event.page, event.query, event.worker]) {
+      const cell = document.createElement('td'); cell.textContent = value; row.append(cell);
+    }
+    return row;
+  }));
+}
+function showPages(pages) {
+  const current = pages.find(result => result.path === page);
+  if (current) {
+    $('preview').srcdoc = `<!doctype html><meta charset="utf-8"><style>body{font:16px/1.6 system-ui;padding:12px;color:#292d29}pre{overflow:auto}a{color:#42664b}</style>${current.html}`;
+  }
+  $('diagnostics').replaceChildren(...pages.flatMap(result => result.diagnostics.map(diagnostic => {
+    const item = document.createElement('li'), button = document.createElement('button');
+    button.textContent = `${result.path}:${diagnostic.location.line}:${diagnostic.location.column}: ${diagnostic.message}`;
+    button.onclick = async () => {
+      if (result.path !== page) await openPage(result.path);
+      if (result.path !== page) return;
+      // The protocol uses UTF-8 byte offsets; textarea selections use UTF-16 offsets.
+      const bytes = new TextEncoder().encode($('editor').value), decoder = new TextDecoder();
+      const start = decoder.decode(bytes.slice(0, diagnostic.location.start)).length;
+      const end = decoder.decode(bytes.slice(0, diagnostic.location.end)).length;
+      $('editor').focus(); $('editor').setSelectionRange(start, end);
+    };
+    item.append(button); return item;
+  })));
+}
+// Commands share one queue. Obsolete debounced previews can be skipped before they
+// reach the host; a response to older text never replaces a newer editor buffer.
+function send(command, replaceText = false, version = editVersion, display = true) {
+  const task = async () => {
+    if (command.op === 'preview' && version !== editVersion) return;
+    busy++;
+    try {
+      const response = await fetch('/api', { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify(command) });
+      const result = await response.json();
+      if (!response.ok) throw new Error(result.error);
+      showState(result.state);
+      if (!display || version !== editVersion) return result;
+      $('message').textContent = '';
+      if (replaceText && result.text !== undefined) {
+        page = result.pages[0].path;
+        $('editor').value = loadedText = result.text;
+      } else if (replaceText && result.pages.length === 0) {
+        page = ''; loadedText = ''; $('editor').value = '';
+        $('preview').srcdoc = '';
+      }
+      if (result.work) showWork(result.work);
+      showPages(result.pages);
+      showState(result.state);
+      return result;
+    } catch (error) {
+      $('message').textContent = error.message;
+      throw error;
+    } finally { busy--; }
+  };
+  const pending = queue.then(task);
+  queue = pending.catch(() => {});
+  return pending;
+}
+async function openPage(path) {
+  if (path === page) return;
+  if (page && dirty() && !confirm('Discard the current draft and open another document?')) return;
+  clearTimeout(timer); editVersion++;
+  if (state.draft && state.draft !== path) await send({ op: 'discard', page }, false, editVersion, false);
+  page = path;
+  await send({ op: 'open', page }, true);
+}
+$('editor').addEventListener('input', () => {
+  editVersion++; showState(state); clearTimeout(timer);
+  timer = setTimeout(() => send({ op: 'preview', page, text: $('editor').value }).catch(() => {}), 250);
+});
+$('save').onclick = () => {
+  clearTimeout(timer);
+  send({ op: 'save', page, text: $('editor').value }, true).catch(() => {});
+};
+$('discard').onclick = () => {
+  clearTimeout(timer); editVersion++;
+  send({ op: 'discard', page }, true).catch(() => {});
+};
+$('build').onclick = async () => {
+  clearTimeout(timer);
+  try {
+    if (page) await send({ op: 'preview', page, text: $('editor').value });
+    await send({ op: 'build' });
+  } catch { /* send displays the error */ }
+};
+$('preview').onload = () => {
+  $('preview').contentDocument.addEventListener('click', event => {
+    const link = event.target.closest('a');
+    if (!link) return;
+    event.preventDefault();
+    const encodedPage = page.replace(/\.md$/, '.html').split('/').map(encodeURIComponent).join('/');
+    const base = new URL(`/pages/${encodedPage}`, location.origin);
+    const target = new URL(link.getAttribute('href'), base);
+    if (target.origin !== location.origin || !target.pathname.startsWith('/pages/')) {
+      if (['https:', 'http:', 'mailto:'].includes(target.protocol)) window.open(target.href, '_blank', 'noopener');
+      return;
+    }
+    const path = decodeURIComponent(target.pathname.slice('/pages/'.length)).replace(/\.html$/, '.md');
+    if (path === page) {
+      $('preview').contentDocument.getElementById(decodeURIComponent(target.hash.slice(1)))?.scrollIntoView();
+    } else if (state.pages.includes(path)) {
+      openPage(path).catch(() => {});
+    }
+  });
+};
+async function poll() {
+  if (busy) return;
+  try {
+    const response = await fetch('/api/state'), result = await response.json();
+    if (!response.ok) throw new Error(result.error);
+    if (result.watch_error) $('message').textContent = result.watch_error;
+    if (result.state.generation === state.generation) return;
+    const keepDraft = page && dirty();
+    showState(result.state);
+    if (!state.pages.includes(page)) {
+      page = ''; loadedText = ''; $('editor').value = '';
+      if (state.pages.length) {
+        const initial = state.draft || (state.pages.includes('index.md') ? 'index.md' : state.pages[0]);
+        await openPage(initial);
+      }
+      else { $('preview').srcdoc = ''; $('diagnostics').replaceChildren(); }
+    } else if (keepDraft) {
+      await send({ op: 'preview', page, text: $('editor').value });
+    } else {
+      await send({ op: 'open', page }, true);
+    }
+  } catch (error) { $('message').textContent = error.message; }
+}
+window.addEventListener('beforeunload', event => { if (page && dirty()) { event.preventDefault(); event.returnValue = ''; } });
+poll(); setInterval(poll, 750);
+</script>
+</html>

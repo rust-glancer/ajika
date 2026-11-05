@@ -1,0 +1,4 @@
+/* Keep whitespace-only edits visible in inline code examples. */
+.content :not(pre) > code {
+    white-space: pre-wrap;
+}

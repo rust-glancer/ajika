@@ -1,0 +1,31 @@
+[package]
+name = "ajika-handbook"
+version.workspace = true
+edition.workspace = true
+authors.workspace = true
+license.workspace = true
+publish = false
+description = "An incremental handbook compiler and single-user preview editor."
+
+[[bin]]
+name = "handbook"
+path = "src/main.rs"
+doc = false
+
+[dependencies]
+ajika.workspace = true
+anyhow.workspace = true
+clap = { workspace = true, features = ["derive"] }
+notify-debouncer-full.workspace = true
+percent-encoding.workspace = true
+pulldown-cmark = { workspace = true, features = ["html"] }
+serde = { workspace = true, features = ["derive", "rc"] }
+serde_json.workspace = true
+tempfile.workspace = true
+tiny_http.workspace = true
+url.workspace = true
+walkdir.workspace = true
+wincode = { workspace = true, features = ["derive"] }
+
+[lints]
+workspace = true
