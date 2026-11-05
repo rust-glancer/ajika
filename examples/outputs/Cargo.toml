@@ -1,0 +1,19 @@
+[package]
+name = "ajika-outputs"
+version.workspace = true
+edition.workspace = true
+authors.workspace = true
+license.workspace = true
+publish = false
+description = "Named outputs with independent invalidation."
+
+[[bin]]
+name = "outputs"
+path = "src/main.rs"
+doc = false
+
+[dependencies]
+ajika.workspace = true
+
+[lints]
+workspace = true

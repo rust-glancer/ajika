@@ -1,0 +1,21 @@
+[package]
+name = "registry_probe"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+publish.workspace = true
+
+[dependencies]
+ajika.workspace = true
+fixture_queries.workspace = true
+
+[dev-dependencies]
+tempfile.workspace = true
+
+[[bin]]
+name = "registry-probe"
+path = "src/main.rs"
+
+[[bin]]
+name = "empty-registry"
+path = "src/empty.rs"

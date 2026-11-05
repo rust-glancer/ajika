@@ -1,0 +1,20 @@
+[package]
+name = "ajika-editor-session"
+version.workspace = true
+edition.workspace = true
+authors.workspace = true
+license.workspace = true
+publish = false
+description = "Unsaved editor changes and promotion on save."
+
+[[bin]]
+name = "editor-session"
+path = "src/main.rs"
+doc = false
+
+[dependencies]
+ajika.workspace = true
+tempfile.workspace = true
+
+[lints]
+workspace = true

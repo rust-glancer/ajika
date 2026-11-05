@@ -1,0 +1,20 @@
+[package]
+name = "ajika-persistence"
+version.workspace = true
+edition.workspace = true
+authors.workspace = true
+license.workspace = true
+publish = false
+description = "Reusing query results after reopening a database."
+
+[[bin]]
+name = "persistence"
+path = "src/main.rs"
+doc = false
+
+[dependencies]
+ajika.workspace = true
+tempfile.workspace = true
+
+[lints]
+workspace = true

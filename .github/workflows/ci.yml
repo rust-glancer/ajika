@@ -1,0 +1,109 @@
+name: CI
+
+on:
+  pull_request:
+  push:
+    branches:
+      - main
+
+permissions:
+  contents: read
+
+# Cancel superseded PR runs while allowing main to finish refreshing shared caches.
+concurrency:
+  group: ${{ github.workflow }}-${{ github.event_name }}-${{ github.event.pull_request.number || github.run_id }}
+  cancel-in-progress: ${{ github.event_name == 'pull_request' }}
+
+jobs:
+  lints:
+    runs-on: ubuntu-latest
+    timeout-minutes: 30
+    steps:
+      - uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd # v6
+        with:
+          persist-credentials: false
+      - uses: taiki-e/install-action@16b05812d776ae1dfaabc8277e421fb6d2506419 # v2.82.7
+        with:
+          tool: cargo-dylint@6.3.0,dylint-link@6.0.4,just@1.48.1
+      - uses: ./.github/actions/cargo-cache
+        with:
+          scope: ci-${{ github.job }}
+          target-dir: target
+          dependency-key: ${{ hashFiles('**/Cargo.lock', '**/Cargo.toml', 'rust-toolchain.toml', 'Justfile', '.github/workflows/ci.yml') }}
+          extra-paths: |
+            ~/.dylint_drivers
+            ~/.rustup/toolchains/nightly-*
+            target/dylint/libraries/**/release/*@*
+      - name: Install rustfmt toolchain
+        run: rustup toolchain install "$(just --evaluate rustfmt_toolchain)" --profile minimal --component rustfmt
+      - name: Check formatting, Clippy, and Dylint
+        run: just lint
+
+  tests:
+    # Windows covers distinct storage I/O and cleanup paths; macOS shares the Unix implementation.
+    name: tests (${{ matrix.os }})
+    runs-on: ${{ matrix.os }}
+    timeout-minutes: 20
+    strategy:
+      fail-fast: false
+      matrix:
+        os: [ubuntu-latest, windows-latest]
+    steps:
+      - uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd # v6
+        with:
+          persist-credentials: false
+      - uses: ./.github/actions/cargo-cache
+        with:
+          scope: ci-${{ github.job }}
+          target-dir: target
+          dependency-key: ${{ hashFiles('**/Cargo.lock', '**/Cargo.toml', 'rust-toolchain.toml', 'Justfile') }}
+      - uses: taiki-e/install-action@16b05812d776ae1dfaabc8277e421fb6d2506419 # v2.82.7
+        with:
+          tool: cargo-nextest@0.9.132,just@1.48.1
+      - name: Run tests, doctests, and release replay
+        run: just test
+
+  docs:
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+    steps:
+      - uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd # v6
+        with:
+          persist-credentials: false
+      - uses: ./.github/actions/cargo-cache
+        with:
+          scope: ci-${{ github.job }}
+          target-dir: target
+          dependency-key: ${{ hashFiles('**/Cargo.lock', '**/Cargo.toml', 'rust-toolchain.toml') }}
+      - uses: taiki-e/install-action@16b05812d776ae1dfaabc8277e421fb6d2506419 # v2.82.7
+        with:
+          tool: just@1.48.1,mdbook@0.5.4
+      - name: Build the book and API documentation
+        run: just docs
+      - name: Test book examples
+        run: just test-book
+
+  # Report new advisories without making them part of the required PR check.
+  cargo-deny:
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    steps:
+      - uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd # v6
+        with:
+          persist-credentials: false
+      - uses: taiki-e/install-action@16b05812d776ae1dfaabc8277e421fb6d2506419 # v2.82.7
+        with:
+          tool: cargo-deny@0.19.4,just@1.48.1
+      - name: Check both dependency graphs
+        run: just deny
+
+  pr-checks:
+    if: always()
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+    needs: [lints, tests, docs]
+    steps:
+      - name: Decide on PR checks
+        uses: re-actors/alls-green@05ac9388f0aebcb5727afa17fcccfecd6f8ec5fe # v1.2.2
+        with:
+          jobs: ${{ toJSON(needs) }}

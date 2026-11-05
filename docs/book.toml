@@ -1,0 +1,18 @@
+[book]
+title = "The Ajika Book"
+authors = ["Igor Aleksanov"]
+language = "en"
+src = "src"
+
+[build]
+build-dir = "../target/book"
+
+[rust]
+edition = "2024"
+
+[output.html]
+git-repository-url = "https://github.com/rust-glancer/ajika"
+additional-css = ["theme/custom.css"]
+
+[output.html.playground]
+runnable = false

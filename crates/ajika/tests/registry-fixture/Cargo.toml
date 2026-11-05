@@ -1,0 +1,19 @@
+[workspace]
+members = ["crates/queries", "crates/probe"]
+resolver = "3"
+
+[workspace.package]
+version = "0.0.0"
+edition = "2024"
+license = "MIT OR Apache-2.0"
+publish = false
+
+[workspace.dependencies]
+# A separate provider crate exercises linker retention without linking any alternative collector.
+ajika = { path = "../..", version = "0.1.0" }
+fixture_queries = { path = "crates/queries", version = "0.0.0" }
+tempfile = "3.27.0"
+
+[profile.release]
+lto = "fat"
+codegen-units = 1
