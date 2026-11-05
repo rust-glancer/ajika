@@ -1,8 +1,49 @@
 # About Ajika
 
-An editor often asks the same questions after each edit: what words are in a
-file, where are they, and how many are there? In this book, we'll build a small
-text analyzer for those questions, starting with word counts.
+Ajika is a library that lets your application to remember computations and reuse
+them when inputs do not change. Moreover, it lets you to store these computations
+to the disk, allowing you to offload computations from memory when they are not
+needed, load them on demand, and reuse computations across the application restarts.
+
+In other words, Ajika is a **persistent incrementality** library.
+
+Ajika is heavily inspired by [Salsa](https://github.com/salsa-rs/salsa), with
+a different focus. Salsa is generally oriented to provide maximum efficiency, and
+is memory-first. Ajika is the opposite: it accepts a performance hit (often not
+very big in practice, especially for heavy computations) to offload data _from_
+memory and load it from disk on demand. It might be a good choice if you want to
+use Salsa approach but reduce the memory usage.
+
+You can also keep reusable work in RAM with a memory database. For frequent
+unsaved edits, a session overlay can reuse results in memory while preserving
+saved answers on disk. The query functions stay the same in each case; the
+following chapters show how to choose where their results live.
+
+## LLM usage disclaimer
+
+This book was written with use of LLMs, but it has plenty a human touch.
+I've spend hours on this text to make sure that it's something I am comfortable
+reading myself, so, I hope, it will be a good read for you too.
+
+Regardless, I am very open for feedback, so if some parts (or even the book as a whole)
+do not feel good, please [open an issue](https://github.com/rust-glancer/ajika/issues)
+and I'll work on it.
+
+Eventually I do plan to rewrite the documentation myself from scratch, but it's a very
+big amount of work and there are only so many hours in a day.
+
+## About this book
+
+This book tries to teach you Ajika through a prism of a very naive query in a
+text editor. The request is very stupid: how many words are there in the document.
+
+In real world, the queries are typically much heavier, when your task
+is implementing an LSP server, a compiler, or a build system. The editor we're
+discussing is, obviously, not a project where Ajika shines (because with such simple queries
+the persistence overhead will dominate, and the memory usage is low anyways), but a project
+that is useful for understanding basic concepts.
+
+Regardless, let's think how we would implement such a request.
 
 ## From functions to queries
 
@@ -39,23 +80,6 @@ spaces. Ajika reruns `words` because the text changed, but its answer is still
 the count without running its function again. Counting words is cheap, but the
 same boundary could protect an expensive analysis from unnecessary work.
 
-## Reuse across requests and restarts
-
-With a disk database, Ajika provides **persistent incrementality**: it saves query
-results and their dependencies, so later requests can validate and reuse those
-results even after a restart.
-
-Ajika is inspired by [Salsa](https://github.com/salsa-rs/salsa), with a different
-emphasis on where reusable work lives. Salsa is memory-first, while Ajika is
-designed to serve requests from a disk cache. It loads query values for an
-operation, then releases its working data when the operation ends. Large results
-can stay reusable on disk without occupying RAM between requests.
-
-You can also keep reusable work in RAM with a memory database. For frequent
-unsaved edits, a session overlay can reuse results in memory while preserving
-saved answers on disk. The query functions stay the same in each case; the
-following chapters show how to choose where their results live.
-
 ## How to read this book
 
 The [tutorial](using/first-queries.md) turns the queries above into a runnable
@@ -83,9 +107,8 @@ Ajika's disk store is a disposable cache. It is not the authoritative copy of th
 inputs, a general database for user data, or a way to query arbitrary historical
 revisions. A corrupted or incompatible cache can be discarded and rebuilt.
 
-The project is under active development. APIs and cache formats can change. The
-examples here are checked against the library in this repository.
+The project is under active development. APIs and cache formats can change.
 
 ## About this book
 
-This book is also inspired by [the Salsa book](https://salsa-rs.github.io/salsa/).
+This book is obviously inspired by [the Salsa book](https://salsa-rs.github.io/salsa/).

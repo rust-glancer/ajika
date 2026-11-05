@@ -12,16 +12,6 @@ From this repository, run it with:
 cargo run -p ajika-word-count
 ```
 
-For a separate application next to an Ajika checkout, add a path dependency:
-
-```sh
-cargo add ajika --path ../ajika/crates/ajika
-```
-
-You can also use this repository as a Git dependency.
-The runtime re-exports its declaration macros; there is no separate macro dependency
-to add.
-
 ## Describe the question
 
 An input is data supplied from outside the query graph. Here its key is a path and
