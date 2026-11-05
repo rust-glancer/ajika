@@ -98,6 +98,6 @@ The interner is shared for the database's lifetime and restored before queries
 intern new objects. Each declaration has its own numbering space. Looking up an
 ID's fields does not add a query dependency because the assignment is immutable.
 
-See [`Interner`](https://github.com/rust-glancer/ajika/blob/main/crates/ajika/src/interner/mod.rs#L23) for assignment ownership and the
+See [`Interner`](https://github.com/rust-glancer/ajika/blob/main/crates/ajika/src/interner/mod.rs#L33) for assignment ownership and the
 [user chapter](../using/interning.md) for its reset boundary. The interner must
 remain consistent with every saved key that contains its IDs.

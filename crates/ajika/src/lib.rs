@@ -14,7 +14,13 @@ use ajika_storage as storage;
 #[doc(hidden)]
 pub mod __private;
 
-pub use ajika_macros::{input, interned, output, query, register};
+/// # Related APIs
+///
+/// The generated provider implements [`Query`]. Query keys and persistent result values use
+/// [`Persist`], and the `validate` option implements [`Query::validate`].
+#[doc(inline)]
+pub use ajika_macros::query;
+pub use ajika_macros::{input, interned, output, register};
 pub use ajika_storage::{Compression, DatabaseInUse, Statistics as StorageStatistics, StorageFull};
 pub use anyhow::Result;
 

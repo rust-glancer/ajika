@@ -19,6 +19,16 @@ use crate::{Persist, Result, codec, storage};
 /// Each declaration has one numbering space per database. Include context in the declaration's
 /// fields when it is part of the entity's identity. Cloned handles share all assignments.
 /// Unlike query results, an assignment has no dependencies and never changes after publication.
+///
+/// The handle returned by [`Database::interner`](crate::Database::interner) shares that database's
+/// assignments. An ID is only meaningful with its interner: another database can assign the same
+/// number to different fields.
+///
+/// New assignments are saved alongside query data at a durable checkpoint; allocating an ID
+/// alone doesn't save it to disk. Reopening a compatible cache restores the saved assignments.
+/// IDs are never recycled within a live interner. Query collection and
+/// [`Database::invalidate`](crate::Database::invalidate) preserve them, but a full cache reset,
+/// such as an epoch change, can discard assignments together with the query data referring to them.
 #[derive(Clone, Default)]
 pub struct Interner {
     state: Arc<Mutex<State>>,

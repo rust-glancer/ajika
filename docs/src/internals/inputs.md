@@ -43,7 +43,7 @@ this distinction between an unseen key and a forgotten observation.
 First acquisition also needs a destination. If the overlay has no local table
 for a field, it captures unseen keys through the base, so the host sharing that
 base sees discovered files too. Once the field has a local table, new captures
-for it stay local. [`Inputs::read`](https://github.com/rust-glancer/ajika/blob/main/crates/ajika/src/input/mod.rs#L216) chooses where to acquire; `lookup` in the same
+for it stay local. [`Inputs::read`](https://github.com/rust-glancer/ajika/blob/main/crates/ajika/src/input/mod.rs#L221) chooses where to acquire; `lookup` in the same
 module checks overrides and forgotten entries before falling through.
 
 Building each successive draft over the saved base keeps lookup from walking a

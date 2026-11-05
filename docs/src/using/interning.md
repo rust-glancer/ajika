@@ -71,6 +71,6 @@ interner. A full reset can discard them. This includes epoch changes and the
 interner size limit checked at open, so IDs must not become an application's
 authoritative identifiers outside the cache lifecycle.
 
-See [`Interner`](https://github.com/rust-glancer/ajika/blob/main/crates/ajika/src/interner/mod.rs#L23) for allocation and checkpointing, and
+See [`Interner`](https://github.com/rust-glancer/ajika/blob/main/crates/ajika/src/interner/mod.rs#L33) for allocation and checkpointing, and
 [storage reclamation](../internals/storage.md) for the distinction between query
 collection and identity reset.

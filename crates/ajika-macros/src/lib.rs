@@ -27,22 +27,38 @@ mod query;
 use proc_macro::TokenStream;
 
 /// Declare a synchronous query whose body returns `Result<T>`.
-/// The generated function returns `Result<Arc<T>>`, wrapping each successfully computed value.
-/// Use `forward` when the body already returns `Result<Arc<T>>`, for example by forwarding
-/// another query's result. Ajika then reuses that Arc without wrapping it again.
-/// Handwritten `Query::execute` implementations return `Result<Arc<T>>`.
 ///
-/// Remaining owned arguments form the key. `transient` releases the return value at operation
-/// end while retaining dependency metadata; the default persists values and compares them with
-/// PartialEq.
-/// Optional `name`, `validate`, and `crate` options customize identity, validation,
-/// and a renamed runtime path. `forward` can be combined with these options and `transient`.
+/// The generated function returns `Result<Arc<T>>`, wrapping each successfully computed value.
+/// The first argument is an immutable database context; the remaining owned arguments form
+/// the query key. Reuse depends on reads through that context. The body must give equivalent
+/// answers for equivalent observations, and required side effects belong outside queries
+/// because reuse skips execution.
+///
+/// # Options
+///
+/// By default, Ajika can retain the result between operations. Its value type must support
+/// `Persist + PartialEq`, and equality must cover everything callers can observe.
+///
+/// | Option | Behavior |
+/// | --- | --- |
+/// | `forward` | The body returns `Result<Arc<T>>`; reuse its Arc instead of wrapping an owned value. |
+/// | `transient` | Keep the primary value only during the operation, without requiring serialization or equality. Dependency metadata can still be retained. |
+/// | `name = "..."` | Override the query's stable name. It must be unique within the database's query registry. |
+/// | `validate = path` | Call `fn(&T) -> Result<()>` to check newly computed or decoded values' structure. This does not replace dependency validation or run on every reused value. |
+/// | `crate = path` | Use this path to refer to a renamed Ajika dependency in generated code. |
+///
+/// These options can be combined, including `forward` with `transient`.
+///
+/// # Associated queries
 ///
 /// On a concrete inherent impl, mark individual associated functions with `#[ajika::query]`.
 /// They follow the same calling convention and cannot take a self receiver. `Self` in their
 /// signatures and bodies refers to the owning type; ordinary impl items are unchanged.
 /// Default query names include the owner type and function name. The enclosing impl accepts
 /// only `crate = path`; function attributes accept the usual query options.
+///
+/// The book's [query guide](https://rust-glancer.github.io/ajika/using/queries.html) includes
+/// examples of both free and associated queries.
 #[proc_macro_attribute]
 pub fn query(args: TokenStream, input: TokenStream) -> TokenStream {
     query::expand(args.into(), input.into())

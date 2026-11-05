@@ -120,6 +120,11 @@ impl Inputs {
         Ok(update.inputs)
     }
 
+    /// Create a sparse view over these inputs, initially with no local overrides.
+    /// For example, an editor can keep the saved view as a base and prepare draft text with
+    /// [`edit`](Self::edit). Other captured values stay shared. The view becomes active when
+    /// installed with [`Database::replace_inputs`](crate::Database::replace_inputs).
+    /// Pair draft values with [`Lifetime::Session`] to keep their query results in memory.
     pub fn overlay(&self) -> Self {
         Self {
             base: Some(Arc::new(self.clone())),
