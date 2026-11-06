@@ -60,6 +60,9 @@ handbook *args:
 
 # Keep one dependency build for rustdoc's markdown examples, separate from replay.
 test-book:
+    # Rustdoc's -L lookup cannot distinguish old dependency hashes restored from cache.
+    # Cached artifacts can lack CACHEDIR.TAG, so Cargo refuses to clean this directory itself.
+    rm -rf -- target/book-tests
     cargo build -p ajika-word-count -p ajika-persistence -p ajika-outputs -p ajika-editor-session --locked --target-dir target/book-tests
     mdbook test docs -L target/book-tests/debug/deps
 
