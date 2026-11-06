@@ -1,6 +1,6 @@
 use std::time::Duration;
 
-use ajika::{Database, Db, Inputs, Result, Retention};
+use ajika::{Database, Db, Inputs, Retention};
 
 #[ajika::input(key = String)]
 struct File {
@@ -9,17 +9,17 @@ struct File {
 }
 
 #[ajika::query]
-fn words(db: &Db<'_>, path: String) -> Result<Vec<String>> {
+fn words(db: &Db<'_>, path: String) -> ajika::Result<Vec<String>> {
     let text = File::at(path).text(db)?;
     Ok(text.split_whitespace().map(str::to_owned).collect())
 }
 
 #[ajika::query]
-fn word_count(db: &Db<'_>, path: String) -> Result<usize> {
+fn word_count(db: &Db<'_>, path: String) -> ajika::Result<usize> {
     Ok(words(db, path)?.len())
 }
 
-fn main() -> Result<()> {
+fn main() -> anyhow::Result<()> {
     // ANCHOR: first-open
     // A real application chooses a persistent cache directory.
     let directory = tempfile::tempdir()?;

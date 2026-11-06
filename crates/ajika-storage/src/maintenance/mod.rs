@@ -14,18 +14,20 @@ use std::{
     time::Instant,
 };
 
-use anyhow::Result;
 use redb::ReadableTable;
 
 use crate::{
-    Database, Write,
+    Database, Error, Result, Write,
     format::{FrameHeader, Location, PACKS, PackHeader, PackInfo, VALUES},
     pack::PackWriter,
 };
 
 pub(crate) const PASS_BYTES: u64 = 16 * 1024 * 1024;
+
 const PASS_FRAMES: u64 = 4096;
+
 const SMALL_PACK_BYTES: u64 = PASS_BYTES / 4;
+
 const SMALL_PACK_COUNT: usize = 8;
 
 impl Database {
@@ -127,8 +129,10 @@ impl Database {
                 let end = offset
                     .checked_add(FrameHeader::LENGTH)
                     .and_then(|start| start.checked_add(header.stored_length))
-                    .ok_or_else(|| anyhow::anyhow!("invalid pack frame range"))?;
-                anyhow::ensure!(end <= info.length, "invalid pack frame range");
+                    .ok_or_else(|| Error::invalid_cache("invalid pack frame range"))?;
+                if !(end <= info.length) {
+                    return Err(Error::invalid_cache("invalid pack frame range"));
+                }
                 let live = {
                     let table = write.transaction.open_table(VALUES)?;
                     let location = table
@@ -141,7 +145,9 @@ impl Database {
                             offset: at,
                             header: expected,
                         }) if pack == id && at == offset => {
-                            anyhow::ensure!(header == expected, "invalid stored frame header");
+                            if !(header == expected) {
+                                return Err(Error::invalid_cache("invalid stored frame header"));
+                            }
                             true
                         }
                         _ => false,
@@ -165,10 +171,11 @@ impl Database {
             remaining.scan_offset = offset;
             // A damaged dead-frame length could skip a live frame. Never retire such a file:
             // its inventory must agree that all live locations have actually moved.
-            anyhow::ensure!(
-                offset < info.length || remaining.live_values == 0,
-                "pack inventory contains unreachable frames"
-            );
+            if !(offset < info.length || remaining.live_values == 0) {
+                return Err(Error::invalid_cache(
+                    "pack inventory contains unreachable frames",
+                ));
+            }
             if remaining.live_values == 0 {
                 retired += 1;
             }

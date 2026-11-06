@@ -15,32 +15,7 @@ use std::{
 };
 
 use super::{diagnostics::Hex, record::Id};
-use crate::Result;
-
-/// An operation error that can be returned to every worker that must stop because of it.
-/// Workers share the first failure's cause even after its original caller has returned.
-/// Keeping the error behind an [`Arc`] preserves the original error chain instead of copying text
-/// or extracting just its root cause. Hosts can walk that chain to find a [`QueryCycle`] without
-/// losing context supplied by the application.
-#[derive(Clone, Debug)]
-pub(crate) struct Failure(Arc<anyhow::Error>);
-
-impl Failure {
-    pub(crate) fn new(error: anyhow::Error) -> Self {
-        Self(Arc::new(error))
-    }
-}
-
-impl fmt::Display for Failure {
-    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
-        fmt::Display::fmt(&self.0, f)
-    }
-}
-impl std::error::Error for Failure {
-    fn source(&self) -> Option<&(dyn std::error::Error + 'static)> {
-        Some(self.0.as_ref().as_ref())
-    }
-}
+use crate::{Cancelled, Error, Result};
 
 /// A handle the host can use to request that one operation stop, usually from another thread.
 /// Clones signal the same request. Get it from the database before [`run`](super::Database::run);
@@ -73,17 +48,6 @@ impl Cancellation {
     }
 }
 
-/// The error returned when an operation observes a cancellation request.
-/// Hosts can recognize this expected interruption with `error.is::<ajika::Cancelled>()`.
-#[derive(Debug)]
-pub struct Cancelled;
-impl fmt::Display for Cancelled {
-    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
-        f.write_str("query operation cancelled")
-    }
-}
-impl std::error::Error for Cancelled {}
-
 /// One query/key pair participating in a [`QueryCycle`]. Keys stay opaque: query authors do not
 /// need to implement Debug or expose source text to make a cycle identifiable.
 #[derive(Clone, Debug, PartialEq, Eq)]
@@ -104,8 +68,8 @@ impl fmt::Display for QueryCall {
 ///
 /// [`calls`](Self::calls) follows parent-to-child edges and repeats the first call at the end.
 /// It is one cycle witness, not every active call or the complete saved dependency graph.
-/// Hosts can find it in [`anyhow::Error::chain`] by downcasting each cause to `QueryCycle`,
-/// even when tracing is off. The surrounding error keeps application context and shared failures.
+/// Hosts can inspect [`crate::ErrorKind::Cycle`] even when tracing is off.
+/// Diagnostic context and worker sharing preserve that classification.
 #[derive(Clone, Debug)]
 pub struct QueryCycle {
     pub calls: Vec<QueryCall>,
@@ -139,7 +103,7 @@ struct State {
     // as well as calls waiting for a claim: both can close a cycle. Parallel branches may make
     // the same parent -> child call, so one branch finishing must not remove another's edge.
     calls: HashMap<(Id, Id), usize>,
-    failure: Option<Failure>,
+    failure: Option<Error>,
 }
 
 impl State {
@@ -188,9 +152,6 @@ impl Coordination {
     /// Let a running worker notice that it must stop, returning cancellation or the first failure.
     /// The normal path only reads atomic flags; it needs the mutex when retrieving a failure's cause.
     pub(crate) fn check(&self) -> Result<()> {
-        if self.cancelled.load(Ordering::Acquire) {
-            return Err(Cancelled.into());
-        }
         if self.failed.load(Ordering::Acquire) {
             let failure = self
                 .state
@@ -199,16 +160,23 @@ impl Coordination {
                 .failure
                 .clone()
                 .expect("failed operation has a cause");
-            return Err(failure.into());
+            return Err(failure);
+        }
+        if self.cancelled.load(Ordering::Acquire) {
+            return Err(Cancelled::at("query operation").into());
         }
         Ok(())
     }
 
     /// Preserve the first error and notify every waiter that no more results should be accepted.
     /// Recording this centrally matters even when a provider catches its own returned error.
-    pub(crate) fn fail(&self, failure: Failure) {
+    pub(crate) fn fail(&self, failure: Error) {
         let mut state = self.state.lock().expect("claim state");
-        state.failure.get_or_insert(failure);
+        if state.failure.is_none()
+            || state.failure.as_ref().is_some_and(Error::is_cancelled) && !failure.is_cancelled()
+        {
+            state.failure = Some(failure);
+        }
         self.failed.store(true, Ordering::Release);
         self.ready.notify_all();
     }
@@ -266,13 +234,13 @@ impl Coordination {
             claim.edge = Some((parent, key));
         }
         loop {
-            if self.cancelled.load(Ordering::Acquire) {
-                return Err(Cancelled.into());
-            }
             if let Some(error) = &state.failure {
                 let error = error.clone();
                 drop(state);
-                return Err(error.into());
+                return Err(error);
+            }
+            if self.cancelled.load(Ordering::Acquire) {
+                return Err(Cancelled::at("query operation").into());
             }
             if let Entry::Vacant(entry) = state.running.entry(key) {
                 entry.insert(name);
@@ -326,9 +294,9 @@ impl Drop for Claim<'_> {
             if !self.complete {
                 // An unwinding provider has no ordinary Result to report. Stop the operation
                 // before waking waiters so they do not retry work from the abandoned query.
-                state.failure.get_or_insert_with(|| {
-                    Failure::new(anyhow::anyhow!("query execution abandoned"))
-                });
+                if state.failure.as_ref().is_none_or(Error::is_cancelled) {
+                    state.failure = Some(Error::invariant("query execution abandoned"));
+                }
                 self.coordination.failed.store(true, Ordering::Release);
             }
         }

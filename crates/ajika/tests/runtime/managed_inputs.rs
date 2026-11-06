@@ -2,7 +2,8 @@
 
 use std::{fs, sync::Arc};
 
-use ajika::{Database, Durability, Inputs, Lifetime, Result, Stamp};
+use ajika::{Database, Durability, Inputs, Lifetime, Stamp};
+use anyhow::Result;
 
 use super::retention;
 
@@ -20,12 +21,12 @@ struct Package {
 }
 
 #[ajika::query]
-fn edition(db: &Db) -> Result<u32> {
+fn edition(db: &Db) -> ajika::Result<u32> {
     Package::at(1).edition(db)
 }
 
 #[ajika::query]
-fn text(db: &Db) -> Result<String> {
+fn text(db: &Db) -> ajika::Result<String> {
     Package::at(1).text(db)
 }
 
@@ -69,13 +70,13 @@ struct File {
 }
 
 impl File {
-    fn load(path: &String) -> Result<String> {
-        Ok(fs::read_to_string(path)?)
+    fn load(path: &String) -> ajika::Result<String> {
+        fs::read_to_string(path).map_err(ajika::Error::application)
     }
 }
 
 #[ajika::query]
-fn length(db: &Db, path: String) -> Result<usize> {
+fn length(db: &Db, path: String) -> ajika::Result<usize> {
     Ok(File::at(path).text(db)?.len())
 }
 
@@ -160,11 +161,11 @@ fn forgetting_an_observation_recaptures_it_without_changing_the_saved_snapshot()
 struct SessionText(String);
 
 impl SessionText {
-    fn load(key: &u32) -> Result<Arc<Self>> {
+    fn load(key: &u32) -> ajika::Result<Arc<Self>> {
         Ok(Arc::new(Self(key.to_string())))
     }
 
-    fn stamp(&self) -> Result<Stamp> {
+    fn stamp(&self) -> ajika::Result<Stamp> {
         Ok(Stamp::of(self.0.as_bytes()))
     }
 
@@ -189,7 +190,7 @@ struct SessionFile {
 }
 
 #[ajika::query]
-fn session_length(db: &Db, key: u32) -> Result<usize> {
+fn session_length(db: &Db, key: u32) -> ajika::Result<usize> {
     Ok(SessionFile::at(key).text(db)?.0.len())
 }
 

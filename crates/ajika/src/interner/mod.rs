@@ -121,10 +121,9 @@ impl Interner {
     pub(crate) fn load(rows: Vec<(String, u32, Vec<u8>)>) -> Result<Self> {
         let interner = Self::default();
         for (namespace, expected, key) in rows {
-            anyhow::ensure!(
-                interner.intern(namespace, &key)? == expected,
-                "invalid identity sequence"
-            );
+            if !(interner.intern(namespace, &key)? == expected) {
+                return Err(crate::Error::invalid_cache("invalid identity sequence"));
+            }
         }
         for entries in interner
             .state
@@ -173,9 +172,11 @@ impl Interner {
 /// it neither retains a decoded copy nor records a query dependency.
 pub trait Interned: Copy {
     type Fields: Persist;
+
     const NAMESPACE: &'static str;
 
     fn from_raw(raw: u32) -> Self;
+
     fn as_raw(self) -> u32;
 
     fn intern(interner: &Interner, fields: Self::Fields) -> Result<Self> {
@@ -187,9 +188,12 @@ pub trait Interned: Copy {
 
     fn fields(self, interner: &Interner) -> Result<Self::Fields> {
         let namespace = Self::NAMESPACE;
-        let key = interner
-            .key(namespace, self.as_raw())
-            .ok_or_else(|| anyhow::anyhow!("unknown identity {} in {namespace}", self.as_raw()))?;
+        let key = interner.key(namespace, self.as_raw()).ok_or_else(|| {
+            crate::Error::from(crate::UnavailableData::Identity {
+                namespace,
+                id: self.as_raw(),
+            })
+        })?;
         codec::decode(&key)
     }
 }

@@ -18,7 +18,7 @@ use std::{
     time::{Duration, Instant},
 };
 
-use crate::{Result, Retention, Statistics};
+use crate::{Error, Result, Retention, Statistics};
 
 mod backend;
 mod cache;
@@ -35,13 +35,12 @@ pub(crate) mod value;
 use self::{
     backend::Backend,
     cache::{Memo, Memos},
-    coordination::Failure,
     frame::Frame,
     record::Id,
     registry::Registry,
 };
 pub use self::{
-    coordination::{Cancellation, Cancelled, QueryCall, QueryCycle},
+    coordination::{Cancellation, QueryCall, QueryCycle},
     output::{Output, OutputSlot},
 };
 
@@ -233,6 +232,10 @@ impl<S: Send + Sync + 'static> Database<S> {
     /// Saving cache data and accepting application state remain separate: cancellation or a
     /// maintenance error after commit can make this return an error even though data was saved.
     ///
+    /// The callback uses the same [`Result`] as query providers. A recorded query failure takes
+    /// precedence over cancellation, including cancellation returned directly by the callback.
+    /// Other callback errors retain their context and application-specific cause.
+    ///
     /// Returned [`Arc`]s remain usable and keep their allocations alive. They are ordinary
     /// immutable answers, not a way to issue more queries against a historical input revision.
     pub fn run<R>(&mut self, work: impl FnOnce(&Db<'_, S>) -> Result<R>) -> Result<R> {
@@ -246,11 +249,21 @@ impl<S: Send + Sync + 'static> Database<S> {
                 operation: &operation,
                 frame: &frame,
             };
-            let result: Result<R> = (|| {
+            let result = (|| {
                 db.check_cancelled()?;
                 // Providers can publish completed values to each other in memory. Nothing is
                 // written to disk until the host callback and all its scoped work have finished.
-                let value = work(&db)?;
+                let callback_result = work(&db);
+                // Cancellation means an answer is no longer needed, but must not conceal a
+                // failure that a provider already recorded. Preserve real callback errors so
+                // application-specific causes and any added context survive this boundary.
+                if callback_result.as_ref().is_err_and(Error::is_cancelled)
+                    && let Err(recorded) = self.cancellation.inner.check()
+                    && !recorded.is_cancelled()
+                {
+                    return Err(recorded);
+                }
+                let value = callback_result?;
                 db.check_cancelled()?;
                 self.cancellation.inner.assert_drained();
                 let memos = operation
@@ -299,11 +312,7 @@ impl<S: Send + Sync + 'static> Database<S> {
                 // Relocation needs neither query execution nor the released working values.
                 // A capacity refusal still permits this pass, so reclamation can make progress
                 // without poisoning otherwise readable cached results.
-                if result.is_ok()
-                    || result
-                        .as_ref()
-                        .is_err_and(|error| error.is::<crate::StorageFull>())
-                {
+                if result.is_ok() || result.as_ref().is_err_and(Error::is_capacity) {
                     self.backend.maintain()?;
                 }
                 (
@@ -465,15 +474,13 @@ impl<S: Send + Sync + 'static> Db<'_, S> {
     /// Expected language errors should therefore be ordinary query values, not runtime errors.
     fn handle<T>(&self, work: impl FnOnce() -> Result<T>) -> Result<T> {
         work().map_err(|error| {
-            let failure = Failure::new(error);
-            let cancellation = &self.operation.database.cancellation;
-            cancellation.inner.fail(failure.clone());
-            // Hosts distinguish an expected cancellation from a storage/provider
-            // failure. Keep that public error directly downcastable for waiters too.
-            if cancellation.is_cancelled() {
-                Cancelled.into()
+            let coordination = &self.operation.database.cancellation.inner;
+            coordination.fail(error.clone());
+            // A worker that only observes cancellation must not hide another worker's cause.
+            if error.is_cancelled() {
+                coordination.check().expect_err("operation has stopped")
             } else {
-                failure.into()
+                error
             }
         })
     }

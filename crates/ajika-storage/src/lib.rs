@@ -16,6 +16,7 @@
 //! caller; they never start an automatic rebuild loop.
 
 mod database;
+mod error;
 mod format;
 mod maintenance;
 mod pack;
@@ -24,7 +25,8 @@ mod transaction;
 mod value;
 
 pub use self::{
-    database::{Database, DatabaseInUse, Options, StorageFull},
+    database::{Database, Options},
+    error::{Error, ErrorKind, Result},
     statistics::Statistics,
     transaction::{Read, Write},
     value::{Compression, EncodedValue},

@@ -1,10 +1,12 @@
 use std::{sync::Arc, time::Duration};
 
-use ajika::{Database, Inputs, Result, Retention};
+use ajika::{Database, Inputs, Retention};
+use anyhow::Result;
 
 mod associated;
 mod attributes;
 mod diagnostics;
+mod errors;
 mod interner;
 mod invalidation;
 mod lifecycle;
@@ -36,8 +38,10 @@ impl Sources {
 }
 
 type Db<'a> = ajika::Db<'a, ()>;
-type QueryResult<T> = Result<T>;
-type SharedQueryResult<T> = Result<Arc<T>>;
+
+type AliasedResult<T> = ajika::Result<T>;
+
+type SharedResult<T> = ajika::Result<Arc<T>>;
 
 fn inputs(text: &str) -> Inputs {
     Sources {
@@ -46,6 +50,7 @@ fn inputs(text: &str) -> Inputs {
     }
     .capture()
 }
+
 fn retention() -> Retention {
     Retention {
         max_entries: 256,
@@ -70,7 +75,7 @@ struct Number {
 }
 
 #[ajika::query]
-fn tree(db: &Db, file: u32) -> Result<String> {
+fn tree(db: &Db, file: u32) -> ajika::Result<String> {
     let text = Settings::at(()).text(db)?;
     Ok(format!(
         "{file}:{}",
@@ -79,7 +84,7 @@ fn tree(db: &Db, file: u32) -> Result<String> {
 }
 
 #[ajika::query]
-fn symbols(db: &Db, file: u32) -> Result<String> {
+fn symbols(db: &Db, file: u32) -> ajika::Result<String> {
     Ok(format!("symbols:{}", tree(db, file)?))
 }
 
@@ -213,35 +218,36 @@ fn memory_storage_retains_typed_values_without_encoding() -> Result<()> {
 // Syntax deliberately has neither equality nor serialization. Its dependency
 // record still lets a stored parent validate without recreating the syntax value.
 struct Syntax(String);
+
 #[ajika::query(transient)]
-fn parse(db: &Db) -> Result<Syntax> {
+fn parse(db: &Db) -> ajika::Result<Syntax> {
     Ok(Syntax(Settings::at(()).text(db)?.to_string()))
 }
 
 #[ajika::query(forward)]
-fn forwarded_text(db: &Db) -> SharedQueryResult<String> {
+fn forwarded_text(db: &Db) -> SharedResult<String> {
     Settings::at(()).text(db)
 }
 
 #[ajika::query(transient, forward)]
-fn forwarded_syntax(db: &Db) -> SharedQueryResult<Syntax> {
+fn forwarded_syntax(db: &Db) -> SharedResult<Syntax> {
     parse(db)
 }
 
 #[test]
 fn forwarding_reuses_input_and_non_cloneable_query_values() -> Result<()> {
     let mut db = Database::memory(inputs("hello"), (), retention());
-    db.run(|db| {
+    Ok(db.run(|db| {
         let text = Settings::at(()).text(db)?;
         assert!(Arc::ptr_eq(&text, &forwarded_text(db)?));
         let syntax = parse(db)?;
         assert!(Arc::ptr_eq(&syntax, &forwarded_syntax(db)?));
         Ok(())
-    })
+    })?)
 }
 
 #[ajika::query]
-fn parsed_length(db: &Db) -> Result<usize> {
+fn parsed_length(db: &Db) -> ajika::Result<usize> {
     Ok(parse(db)?.0.len())
 }
 
@@ -307,8 +313,9 @@ struct DeclarationOutputs {
     shape: String,
     location: usize,
 }
+
 #[ajika::query]
-fn declarations(db: &Db) -> Result<DeclarationOutputs> {
+fn declarations(db: &Db) -> ajika::Result<DeclarationOutputs> {
     let text = Settings::at(()).text(db)?;
     DeclarationOutputs::new(
         db,
@@ -316,12 +323,14 @@ fn declarations(db: &Db) -> Result<DeclarationOutputs> {
         Arc::new(text.len()),
     )
 }
+
 #[ajika::query(forward)]
-fn semantic(db: &Db) -> Result<Arc<String>> {
+fn semantic(db: &Db) -> ajika::Result<Arc<String>> {
     declarations(db)?.shape.value(db)
 }
+
 #[ajika::query(forward)]
-fn navigation(db: &Db) -> Result<Arc<usize>> {
+fn navigation(db: &Db) -> ajika::Result<Arc<usize>> {
     declarations(db)?.location.value(db)
 }
 
@@ -394,7 +403,7 @@ fn named_outputs_change_independently() -> Result<()> {
 }
 
 #[ajika::query]
-fn choose(db: &Db) -> QueryResult<u32> {
+fn choose(db: &Db) -> AliasedResult<u32> {
     if Settings::at(()).choose_left(db)? {
         return Number::at(true).value(db);
     }
@@ -466,11 +475,12 @@ fn equal_branch_changes_replace_old_dependencies() -> Result<()> {
 }
 
 #[ajika::query]
-fn leaf(_db: &Db, key: u32) -> Result<u32> {
+fn leaf(_db: &Db, key: u32) -> ajika::Result<u32> {
     Ok(key)
 }
+
 #[ajika::query]
-fn parallel_root(db: &Db, _key: u32) -> Result<u32> {
+fn parallel_root(db: &Db, _key: u32) -> ajika::Result<u32> {
     let children = db.parallel_map(&(0..16).collect::<Vec<_>>(), |db, key| leaf(db, *key))?;
     Ok(children.iter().map(|value| **value).sum())
 }

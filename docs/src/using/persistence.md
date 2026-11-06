@@ -11,6 +11,7 @@ Run it with `cargo run -p ajika-persistence`.
 
 ```rust
 # extern crate ajika;
+# extern crate anyhow;
 # extern crate tempfile;
 {{#rustdoc_include ../../../examples/persistence/src/main.rs:first-open}}
 ```
@@ -28,6 +29,7 @@ not the concurrency model.
 
 ```rust
 # extern crate ajika;
+# extern crate anyhow;
 # extern crate tempfile;
 {{#rustdoc_include ../../../examples/persistence/src/main.rs:reopen}}
 ```
@@ -47,6 +49,7 @@ Ask again under the same inputs:
 
 ```rust
 # extern crate ajika;
+# extern crate anyhow;
 # extern crate tempfile;
 {{#rustdoc_include ../../../examples/persistence/src/main.rs:later-operation}}
 ```

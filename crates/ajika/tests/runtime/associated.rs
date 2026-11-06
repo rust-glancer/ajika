@@ -1,6 +1,7 @@
 use std::sync::Arc;
 
-use ajika::{Database, Result};
+use ajika::Database;
+use anyhow::Result;
 
 use super::{Db, Number};
 
@@ -12,18 +13,18 @@ impl Scaled {
     const FACTOR: u32 = 2;
 
     #[ajika::query(validate = Self::validate)]
-    fn captured(db: &Db<'_>, mut offset: u32) -> Result<Self> {
+    fn captured(db: &Db<'_>, mut offset: u32) -> ajika::Result<Self> {
         offset += Number::at(true).value(db)?;
         Ok(Self::from_value(offset))
     }
 
     #[ajika::query(forward, validate = Self::validate)]
-    fn forwarded(db: &Db<'_>, offset: u32) -> Result<Arc<Self>> {
+    fn forwarded(db: &Db<'_>, offset: u32) -> ajika::Result<Arc<Self>> {
         Self::captured(db, offset)
     }
 
     #[ajika::query(transient)]
-    fn from_previous(_db: &Db<'_>, previous: Self, extra: u32) -> Result<Self> {
+    fn from_previous(_db: &Db<'_>, previous: Self, extra: u32) -> ajika::Result<Self> {
         Ok(Self(previous.value() + extra))
     }
 
@@ -35,8 +36,10 @@ impl Scaled {
         self.0
     }
 
-    fn validate(value: &Self) -> Result<()> {
-        anyhow::ensure!(value.0.is_multiple_of(Self::FACTOR), "scaled value");
+    fn validate(value: &Self) -> ajika::Result<()> {
+        if !value.0.is_multiple_of(Self::FACTOR) {
+            return Err(ajika::Error::contract("scaled value"));
+        }
         Ok(())
     }
 }
@@ -46,7 +49,7 @@ struct Unscaled;
 #[ajika::query]
 impl Unscaled {
     #[ajika::query]
-    fn captured(db: &Db<'_>, offset: u32) -> Result<Scaled> {
+    fn captured(db: &Db<'_>, offset: u32) -> ajika::Result<Scaled> {
         Ok(Scaled(offset + Number::at(true).value(db)?))
     }
 }

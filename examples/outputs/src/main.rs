@@ -1,6 +1,6 @@
 use std::time::Duration;
 
-use ajika::{Database, Db, Inputs, Result, Retention};
+use ajika::{Database, Db, Inputs, Retention};
 
 #[ajika::input(key = String)]
 struct File {
@@ -16,7 +16,7 @@ struct FileOutputs {
 }
 
 #[ajika::query]
-fn analyze(db: &Db<'_>, path: String) -> Result<FileOutputs> {
+fn analyze(db: &Db<'_>, path: String) -> ajika::Result<FileOutputs> {
     let text = File::at(path).text(db)?;
     let mut words = Vec::new();
     let mut locations = Vec::new();
@@ -34,14 +34,14 @@ fn analyze(db: &Db<'_>, path: String) -> Result<FileOutputs> {
 
 // ANCHOR: consumer
 #[ajika::query]
-fn word_count(db: &Db<'_>, path: String) -> Result<usize> {
+fn word_count(db: &Db<'_>, path: String) -> ajika::Result<usize> {
     let outputs = analyze(db, path)?;
     let words = outputs.words.value(db)?;
     Ok(words.len())
 }
 // ANCHOR_END: consumer
 
-fn main() -> Result<()> {
+fn main() -> anyhow::Result<()> {
     let mut database = Database::memory(
         Inputs::default(),
         (),

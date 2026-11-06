@@ -9,11 +9,10 @@ use std::{
     path::Path,
 };
 
-use anyhow::Result;
 use redb::{ReadableDatabase, ReadableTable};
 
 use crate::{
-    Database, DatabaseInUse,
+    Database, Error, Result,
     format::{IDENTITIES, Location, PACKS, PackHeader, PackInfo, RECORDS, VALUES},
 };
 
@@ -45,7 +44,7 @@ impl Statistics {
     pub fn inspect(path: &Path) -> Result<Self> {
         let owner = File::open(path.join("owner.lock"))?;
         owner.try_lock_shared().map_err(|error| match error {
-            fs::TryLockError::WouldBlock => anyhow::Error::from(DatabaseInUse),
+            fs::TryLockError::WouldBlock => Error::in_use(),
             fs::TryLockError::Error(error) => error.into(),
         })?;
         let index = redb::Database::builder()

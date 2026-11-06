@@ -6,8 +6,9 @@
 
 use std::io::{Read, Write};
 
-use anyhow::Result;
 use wincode::{SchemaRead, SchemaWrite};
+
+use crate::{Error, Result};
 
 pub(crate) const INLINE_BYTES: usize = 1024;
 
@@ -58,30 +59,34 @@ impl Compression {
     /// The stored checksum is checked by the reader before it reaches this function.
     pub(crate) fn decode(self, bytes: Vec<u8>, raw_length: u64) -> Result<Vec<u8>> {
         if self == Self::None {
-            anyhow::ensure!(bytes.len() as u64 == raw_length, "invalid raw value length");
+            if !(bytes.len() as u64 == raw_length) {
+                return Err(Error::invalid_cache("invalid raw value length"));
+            }
             return Ok(bytes);
         }
         let mut result = Vec::with_capacity(usize::try_from(raw_length)?);
         let limit = raw_length
             .checked_add(1)
-            .ok_or_else(|| anyhow::anyhow!("invalid value length"))?;
+            .ok_or_else(|| Error::invalid_cache("invalid value length"))?;
         match self {
             Self::None => unreachable!(),
             Self::Lz4 => {
                 lz4_flex::frame::FrameDecoder::new(bytes.as_slice())
                     .take(limit)
-                    .read_to_end(&mut result)?;
+                    .read_to_end(&mut result)
+                    .map_err(Error::invalid_source)?;
             }
             Self::Zstd => {
-                zstd::stream::Decoder::new(bytes.as_slice())?
+                zstd::stream::Decoder::new(bytes.as_slice())
+                    .map_err(Error::invalid_source)?
                     .take(limit)
-                    .read_to_end(&mut result)?;
+                    .read_to_end(&mut result)
+                    .map_err(Error::invalid_source)?;
             }
         }
-        anyhow::ensure!(
-            result.len() as u64 == raw_length,
-            "invalid decoded value length"
-        );
+        if !(result.len() as u64 == raw_length) {
+            return Err(Error::invalid_cache("invalid decoded value length"));
+        }
         Ok(result)
     }
 }

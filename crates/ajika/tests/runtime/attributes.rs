@@ -7,25 +7,26 @@
 
 use std::sync::Arc;
 
-use ajika::{Database, Result};
+use ajika::Database;
+use anyhow::Result;
 type Db<'a> = ajika::Db<'a, ()>;
 
 #[ajika::query]
 #[allow(unused_variables)]
-fn allowed(cx: &Db<'_>) -> Result<u32> {
+fn allowed(cx: &Db<'_>) -> ajika::Result<u32> {
     let unused = 0;
     Ok(1)
 }
 
 #[ajika::query]
 #[cfg_attr(all(), inline, cfg_attr(all(), allow(unused_mut)))]
-fn conditional(_cx: &Db<'_>) -> Result<u32> {
+fn conditional(_cx: &Db<'_>) -> ajika::Result<u32> {
     let mut value = 2;
     Ok(value)
 }
 
 #[ajika::query]
-fn inner(cx: &Db<'_>) -> Result<u32> {
+fn inner(cx: &Db<'_>) -> ajika::Result<u32> {
     //! Documentation and lint policy belong to the function, even when its body moves.
     #![allow(unused_variables)]
     let unused = 0;
@@ -34,7 +35,7 @@ fn inner(cx: &Db<'_>) -> Result<u32> {
 
 #[ajika::query]
 #[expect(unused_variables)]
-fn expected(_cx: &Db<'_>) -> Result<u32> {
+fn expected(_cx: &Db<'_>) -> ajika::Result<u32> {
     let unused = 0;
     Ok(4)
 }
@@ -52,7 +53,7 @@ impl AttributedQuery {
     #[ajika::query(transient)]
     #[expect(unused_variables)]
     #[allow(non_snake_case)]
-    fn captured(_cx: &Db<'_>, Offset: u32) -> Result<Self> {
+    fn captured(_cx: &Db<'_>, Offset: u32) -> ajika::Result<Self> {
         let unused = 0;
         Ok(Self(Self::VALUE + Offset))
     }
@@ -65,7 +66,7 @@ impl AttributedQuery {
 
     #[ajika::query]
     #[cfg_attr(all(), cfg(any()))]
-    fn omitted(_cx: &Db<'_>, value: UnavailableType) -> Result<Self> {
+    fn omitted(_cx: &Db<'_>, value: UnavailableType) -> ajika::Result<Self> {
         unreachable!()
     }
 }
@@ -74,7 +75,7 @@ impl AttributedQuery {
 #[cfg_attr(all(), cfg(any()))]
 impl UnavailableType {
     #[ajika::query]
-    fn captured(_cx: &Db<'_>) -> Result<Self> {
+    fn captured(_cx: &Db<'_>) -> ajika::Result<Self> {
         unreachable!()
     }
 }
@@ -136,7 +137,7 @@ struct DisabledOutputs {
 }
 
 #[ajika::query]
-fn attributed_outputs(db: &Db<'_>) -> Result<AttributedOutputs> {
+fn attributed_outputs(db: &Db<'_>) -> ajika::Result<AttributedOutputs> {
     let outputs = if super::Settings::at(()).choose_left(db)? {
         // A handwritten producer and the generated constructor must address the same slots.
         AttributedOutputs {

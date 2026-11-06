@@ -4,7 +4,7 @@
 
 use std::sync::{Arc, Mutex};
 
-use ajika::{Lifetime, Result, Stamp};
+use ajika::{Lifetime, Stamp};
 use serde::Serialize;
 use wincode::{SchemaRead, SchemaWrite};
 
@@ -26,14 +26,14 @@ pub(crate) struct Source {
 }
 
 impl Source {
-    fn missing(_key: &DocumentId) -> Result<Self> {
+    fn missing(_key: &DocumentId) -> ajika::Result<Self> {
         Ok(Self {
             text: None,
             lifetime: Lifetime::Persistent,
         })
     }
 
-    fn stamp(&self) -> Result<Stamp> {
+    fn stamp(&self) -> ajika::Result<Stamp> {
         Stamp::of_value(&self.text)
     }
 
@@ -59,7 +59,7 @@ pub(crate) struct Analysis {
 #[ajika::query]
 impl Analysis {
     #[ajika::query]
-    pub(crate) fn for_document(cx: &Db<'_>, document: DocumentId) -> Result<Self> {
+    pub(crate) fn for_document(cx: &Db<'_>, document: DocumentId) -> ajika::Result<Self> {
         let path = document.path(&cx.interner())?;
         cx.services().record("analyze", &path);
         let source = Document::at(document).source(cx)?;
@@ -84,7 +84,7 @@ struct Issue {
 }
 
 #[ajika::query]
-fn check_links(cx: &Db<'_>, document: DocumentId) -> Result<Vec<Issue>> {
+fn check_links(cx: &Db<'_>, document: DocumentId) -> ajika::Result<Vec<Issue>> {
     let path = document.path(&cx.interner())?;
     cx.services().record("check links", &path);
     let links = Analysis::for_document(cx, document)?.links.value(cx)?;
@@ -119,7 +119,7 @@ pub(crate) struct Diagnostic {
 }
 
 #[ajika::query]
-fn diagnostics(cx: &Db<'_>, document: DocumentId) -> Result<Vec<Diagnostic>> {
+fn diagnostics(cx: &Db<'_>, document: DocumentId) -> ajika::Result<Vec<Diagnostic>> {
     let path = document.path(&cx.interner())?;
     cx.services().record("locate diagnostics", &path);
     let issues = check_links(cx, document)?;
@@ -144,7 +144,7 @@ pub(crate) struct Page {
 }
 
 impl Page {
-    pub(crate) fn acquire(cx: &Db<'_>, document: DocumentId) -> Result<Self> {
+    pub(crate) fn acquire(cx: &Db<'_>, document: DocumentId) -> ajika::Result<Self> {
         Ok(Self {
             path: document.path(&cx.interner())?,
             html: Analysis::for_document(cx, document)?.html.value(cx)?,

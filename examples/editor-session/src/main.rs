@@ -1,7 +1,7 @@
 // ANCHOR: input
 use std::{sync::Arc, time::Duration};
 
-use ajika::{Database, Db, Inputs, Lifetime, Result, Retention, Stamp};
+use ajika::{Database, Db, Inputs, Lifetime, Retention, Stamp};
 
 #[derive(Clone)]
 struct Text {
@@ -10,7 +10,7 @@ struct Text {
 }
 
 impl Text {
-    fn stamp(&self) -> Result<Stamp> {
+    fn stamp(&self) -> ajika::Result<Stamp> {
         Ok(Stamp::of(self.contents.as_bytes()))
     }
 
@@ -27,11 +27,11 @@ struct File {
 // ANCHOR_END: input
 
 #[ajika::query]
-fn word_count(db: &Db<'_>, path: String) -> Result<usize> {
+fn word_count(db: &Db<'_>, path: String) -> ajika::Result<usize> {
     Ok(File::at(path).text(db)?.contents.split_whitespace().count())
 }
 
-fn main() -> Result<()> {
+fn main() -> anyhow::Result<()> {
     let directory = tempfile::tempdir()?;
     let mut database = Database::open(
         directory.path().join("queries"),

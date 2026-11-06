@@ -6,7 +6,6 @@
 
 use std::{
     collections::HashSet,
-    fmt,
     fs::{self, File, OpenOptions},
     path::{Path, PathBuf},
     sync::{
@@ -15,37 +14,13 @@ use std::{
     },
 };
 
-use anyhow::Result;
 use redb::{ReadableDatabase, ReadableTable};
 
 use crate::{
-    Compression, Read, Statistics, Write,
+    Compression, Error, Read, Result, Statistics, Write,
     format::{self, HEADER, IDENTITIES, PACKS, PackHeader, PackId, PackInfo, RECORDS, VALUES},
     pack::PackWriter,
 };
-
-/// Another owner already holds this cache directory. The host can select another instance.
-#[derive(Debug)]
-pub struct DatabaseInUse;
-
-impl fmt::Display for DatabaseInUse {
-    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
-        f.write_str("query storage is already open")
-    }
-}
-impl std::error::Error for DatabaseInUse {}
-
-/// A value write exhausted the storage budget. Existing values can still be read, and removing
-/// results or compacting remains possible. Unlike a failed commit, this does not poison storage.
-#[derive(Debug)]
-pub struct StorageFull;
-
-impl fmt::Display for StorageFull {
-    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
-        f.write_str("query storage is full; compact it or discard cached results")
-    }
-}
-impl std::error::Error for StorageFull {}
 
 /// Policy for writes and maintenance; existing frames carry their own decoding information.
 #[derive(Debug, Clone, Copy)]
@@ -90,6 +65,7 @@ impl Database {
     /// Open an instance, resetting incompatible or unreadable contents while still owning its
     /// directory lock. Format changes discard derivable data; no schema migration is attempted.
     pub fn open(path: &Path, epoch: &str, options: Options) -> Result<Self> {
+        (|| {
         fs::create_dir_all(path)?;
         let owner = OpenOptions::new()
             .create(true)
@@ -98,7 +74,7 @@ impl Database {
             .write(true)
             .open(path.join("owner.lock"))?;
         owner.try_lock().map_err(|error| match error {
-            fs::TryLockError::WouldBlock => anyhow::Error::from(DatabaseInUse),
+            fs::TryLockError::WouldBlock => Error::in_use(),
             fs::TryLockError::Error(error) => error.into(),
         })?;
         let packs = path.join("packs");
@@ -106,13 +82,8 @@ impl Database {
         let opened = Self::open_contents(path, epoch);
         let (index, instance) = match opened {
             Ok(contents) => contents,
-            Err(error)
-                if matches!(
-                    error.downcast_ref::<redb::DatabaseError>(),
-                    Some(redb::DatabaseError::DatabaseAlreadyOpen)
-                ) =>
-            {
-                return Err(DatabaseInUse.into());
+            Err(error) if error.kind() == crate::ErrorKind::InUse => {
+                return Err(error);
             }
             Err(error) => {
                 tracing::warn!(%error, path = %path.display(), "discarding unreadable packed storage");
@@ -145,6 +116,7 @@ impl Database {
         }
         database.refresh_physical_bytes()?;
         Ok(database)
+        })().map_err(|error: Error| error.at(path))
     }
 
     fn open_contents(path: &Path, epoch: &str) -> Result<(redb::Database, PackId)> {
@@ -166,7 +138,7 @@ impl Database {
             } else {
                 header
                     .get("instance")?
-                    .ok_or_else(|| anyhow::anyhow!("missing storage instance"))?
+                    .ok_or_else(|| Error::invalid_cache("missing storage instance"))?
                     .value()
                     .try_into()?
             };
@@ -190,30 +162,29 @@ impl Database {
         for entry in read.open_table(PACKS)?.iter()? {
             let (id, bytes) = entry?;
             let info: PackInfo = wincode::deserialize_exact(bytes.value())?;
-            anyhow::ensure!(
-                info.length >= PackHeader::LENGTH
-                    && info.live_bytes <= info.length - PackHeader::LENGTH
-                    && info.live_values > 0
-                    && (PackHeader::LENGTH..info.length).contains(&info.scan_offset),
-                "invalid pack inventory"
-            );
+            if !(info.length >= PackHeader::LENGTH
+                && info.live_bytes <= info.length - PackHeader::LENGTH
+                && info.live_values > 0
+                && (PackHeader::LENGTH..info.length).contains(&info.scan_offset))
+            {
+                return Err(Error::invalid_cache("invalid pack inventory"));
+            }
             let mut file = File::open(PackWriter::path(&path.join("packs"), id.value()))?;
-            anyhow::ensure!(
-                file.metadata()?.len() == info.length,
-                "invalid pack file length"
-            );
+            if !(file.metadata()?.len() == info.length) {
+                return Err(Error::invalid_cache("invalid pack file length"));
+            }
             let mut bytes = [0; PackHeader::LENGTH as usize];
             std::io::Read::read_exact(&mut file, &mut bytes)?;
             let header: PackHeader = wincode::deserialize_exact(&bytes)?;
-            anyhow::ensure!(
-                header
-                    == PackHeader {
-                        magic: PackHeader::MAGIC,
-                        instance,
-                        pack: *id.value()
-                    },
-                "invalid pack identity"
-            );
+            if !(header
+                == PackHeader {
+                    magic: PackHeader::MAGIC,
+                    instance,
+                    pack: *id.value(),
+                })
+            {
+                return Err(Error::invalid_cache("invalid pack identity"));
+            }
         }
         drop(read);
         PackWriter::sync_directory(path)?;
@@ -230,20 +201,21 @@ impl Database {
 
     /// Keep a consistent index view and pin its packs until the reader drops.
     pub fn snapshot(&self) -> Result<Read<'_>> {
-        Read::new(self)
+        Read::new(self).map_err(|error| error.at(self.root.clone()))
     }
 
     /// Begin one checkpoint. Drop any reader first: publication needs exclusive access so old
     /// pack files can be removed as soon as their last committed location is replaced.
     pub fn begin_write(&self) -> Result<Write<'_>> {
-        Write::new(self)
+        Write::new(self).map_err(|error| error.at(self.root.clone()))
     }
 
     pub(crate) fn check(&self) -> Result<()> {
-        anyhow::ensure!(
-            self.healthy.load(Ordering::Acquire),
-            "reopen storage after its failed commit"
-        );
+        if !(self.healthy.load(Ordering::Acquire)) {
+            return Err(
+                Error::unavailable("reopen storage after its failed commit").require_reopen()
+            );
+        }
         Ok(())
     }
 

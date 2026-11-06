@@ -36,21 +36,23 @@ impl Codec {
             encode: |value, length| {
                 let value = value
                     .downcast_ref::<T>()
-                    .ok_or_else(|| anyhow::anyhow!("query value type changed"))?;
+                    .ok_or_else(|| crate::Error::invariant("query value type changed"))?;
                 // The checkpoint already measured this value to form bounded batches. Reuse
                 // that capacity instead of asking serialize() to walk it a second time.
                 let mut bytes = Vec::with_capacity(usize::try_from(length)?);
                 codec::encode_into(&mut bytes, value)?;
-                anyhow::ensure!(bytes.len() as u64 == length, "query encoded size changed");
+                if !(bytes.len() as u64 == length) {
+                    return Err(crate::Error::contract("query encoded size changed"));
+                }
                 Ok(bytes)
             },
             equal: |left, right| {
                 let left = left
                     .downcast_ref::<T>()
-                    .ok_or_else(|| anyhow::anyhow!("query value type changed"))?;
+                    .ok_or_else(|| crate::Error::invariant("query value type changed"))?;
                 let right = right
                     .downcast_ref::<T>()
-                    .ok_or_else(|| anyhow::anyhow!("query value type changed"))?;
+                    .ok_or_else(|| crate::Error::invariant("query value type changed"))?;
                 Ok(left == right)
             },
         }
@@ -76,6 +78,6 @@ impl Value {
         self.data
             .clone()
             .downcast()
-            .map_err(|_| anyhow::anyhow!("query value type changed"))
+            .map_err(|_| crate::Error::invariant("query value type changed"))
     }
 }

@@ -10,8 +10,8 @@ use std::{
     time::{Duration, Instant},
 };
 
-use ajika::{Database, Inputs, Lifetime, Result, Retention};
-use anyhow::Context;
+use ajika::{Database, Inputs, Lifetime, Retention};
+use anyhow::{Context, Result};
 use serde::Serialize;
 
 use crate::queries::{Activity, Db, Document, DocumentId, Execution, Page, Source};
@@ -165,7 +165,7 @@ impl Host {
             return Ok(*id);
         }
         if self.draft.as_ref().is_some_and(|d| d.path == path) {
-            return DocumentId::new(&self.database.interner(), path.to_owned());
+            return Ok(DocumentId::new(&self.database.interner(), path.to_owned())?);
         }
         anyhow::bail!("unknown document: {path}")
     }
@@ -207,7 +207,7 @@ impl Host {
             return Ok(saved.clone());
         };
         let id = DocumentId::new(interner, draft.path.clone())?;
-        saved.overlay().edit(|update| {
+        Ok(saved.overlay().edit(|update| {
             Document::at(id).set_source(
                 update,
                 Source {
@@ -215,7 +215,7 @@ impl Host {
                     lifetime: Lifetime::Session,
                 },
             )
-        })
+        })?)
     }
 
     pub(crate) fn save(&mut self) -> Result<()> {
@@ -283,7 +283,7 @@ impl Host {
         self.run(|cx| cx.parallel_map(&ids, |cx, id| Page::acquire(cx, *id)))
     }
 
-    fn run<T>(&mut self, work: impl FnOnce(&Db<'_>) -> Result<T>) -> Result<Run<T>> {
+    fn run<T>(&mut self, work: impl FnOnce(&Db<'_>) -> ajika::Result<T>) -> Result<Run<T>> {
         self.database.services().take();
         let started = Instant::now();
         let value = self.database.run(work)?;

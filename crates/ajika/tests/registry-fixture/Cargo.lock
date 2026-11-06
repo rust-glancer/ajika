@@ -8,10 +8,10 @@ version = "0.1.0"
 dependencies = [
  "ajika_macros",
  "ajika_storage",
- "anyhow",
  "blake3",
  "getrandom",
  "inventory",
+ "thiserror",
  "tracing",
  "wincode",
 ]
@@ -29,21 +29,15 @@ dependencies = [
 name = "ajika_storage"
 version = "0.1.0"
 dependencies = [
- "anyhow",
  "blake3",
  "getrandom",
  "lz4_flex",
  "redb",
+ "thiserror",
  "tracing",
  "wincode",
  "zstd",
 ]
-
-[[package]]
-name = "anyhow"
-version = "1.0.104"
-source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "330a5ed07fa54e4702c9d6c4174f74427fc0ef6e214bbd677ae50a5099946470"
 
 [[package]]
 name = "arrayvec"

@@ -10,11 +10,16 @@ use wincode::{SchemaRead, SchemaWrite};
 use crate::{Compression, Id};
 
 pub(crate) const FORMAT: &str = "ajika-packs-2";
+
 pub(crate) const HEADER: TableDefinition<&str, &[u8]> = TableDefinition::new("header");
+
 pub(crate) const RECORDS: TableDefinition<&Id, &[u8]> = TableDefinition::new("records");
+
 pub(crate) const IDENTITIES: TableDefinition<(&str, u32), &[u8]> =
     TableDefinition::new("identities");
+
 pub(crate) const VALUES: TableDefinition<&Id, &[u8]> = TableDefinition::new("values");
+
 pub(crate) const PACKS: TableDefinition<&PackId, &[u8]> = TableDefinition::new("packs");
 
 pub(crate) type PackId = [u8; 16];
@@ -56,6 +61,7 @@ pub(crate) struct PackHeader {
 
 impl PackHeader {
     pub(crate) const MAGIC: [u8; 8] = *b"AJKPACK1";
+
     pub(crate) const LENGTH: u64 = 40;
 }
 
@@ -79,8 +85,8 @@ impl FrameHeader {
     }
 }
 
-pub(crate) fn new_id() -> anyhow::Result<PackId> {
+pub(crate) fn new_id() -> crate::Result<PackId> {
     let mut id = [0; 16];
-    getrandom::fill(&mut id).map_err(|error| anyhow::anyhow!("{error}"))?;
+    getrandom::fill(&mut id)?;
     Ok(id)
 }

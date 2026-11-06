@@ -15,6 +15,7 @@ extends our analyzer with a set of output handles:
 
 ```rust
 # extern crate ajika;
+# extern crate anyhow;
 {{#rustdoc_include ../../../examples/outputs/src/main.rs:producer}}
 ```
 
@@ -30,6 +31,7 @@ the returned set can stay equal even if one payload changes.
 
 ```rust
 # extern crate ajika;
+# extern crate anyhow;
 {{#rustdoc_include ../../../examples/outputs/src/main.rs:consumer}}
 ```
 
@@ -41,6 +43,7 @@ Try the whitespace edit:
 
 ```rust
 # extern crate ajika;
+# extern crate anyhow;
 {{#rustdoc_include ../../../examples/outputs/src/main.rs:edit}}
 ```
 

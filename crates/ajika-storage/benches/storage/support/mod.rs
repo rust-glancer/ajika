@@ -1,7 +1,6 @@
 use std::fmt;
 
-use ajika_storage::{Compression, Database, Options};
-use anyhow::Result;
+use ajika_storage::{Compression, Database, Options, Result};
 use divan::{Bencher, black_box};
 
 #[derive(Clone, Copy)]
@@ -61,6 +60,7 @@ impl Case {
         compression: Compression::None,
         payload: Payload::Inline,
     };
+
     pub(crate) const PACKED: Self = Self {
         compression: Compression::None,
         payload: Payload::Structured,

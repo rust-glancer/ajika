@@ -45,6 +45,7 @@ quote = "1.0.45"
 redb = "4.4.0"
 syn = "2.0"
 tempfile = "3.27.0"
+thiserror = "2.0.18"
 tracing = "0.1.44"
 wincode = "0.5.3"
 zstd = { version = "0.14.3", default-features = false }

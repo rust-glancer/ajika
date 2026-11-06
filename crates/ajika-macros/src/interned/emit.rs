@@ -90,8 +90,11 @@ impl Declaration {
             #(#lint_policy)*
             impl #runtime::__private::Interned for #name {
                 type Fields = #stored_fields;
+
                 const NAMESPACE: &'static str = #namespace;
+
                 fn from_raw(raw: u32) -> Self { Self::from_raw(raw) }
+
                 fn as_raw(self) -> u32 { self.as_raw() }
             }
         }

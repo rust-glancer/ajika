@@ -14,11 +14,13 @@ use crate::{Durability, Lifetime, Persist, Result, Stamp, codec};
 /// Fixed-size storage key derived from a query address or output slot. It identifies where
 /// an answer belongs, so replacing the answer reuses the same storage key.
 pub(crate) type Id = [u8; 32];
+
 /// Identifies an answer that consumers may continue to treat as equal.
 /// If a child recomputes to the same value, it keeps this token and its parents can reuse their
 /// answers. A new token means equality with the previous answer could not be established.
 /// This is separate from an input stamp and from the revision in which validation happened.
 pub(crate) type Version = [u8; 16];
+
 /// Selects one of the values produced by a query call. [`None`] is its ordinary return value;
 /// [`Some`] is the encoded name/key of an additional value emitted with
 /// [`db.output`](super::Db::output).
@@ -104,7 +106,7 @@ impl ValueRecord {
         // Collection can remove the old record while a parent still remembers its version.
         // A fresh random token avoids accidentally reusing an old per-query counter value.
         let mut version = [0; 16];
-        getrandom::fill(&mut version).map_err(|error| anyhow::anyhow!("{error}"))?;
+        getrandom::fill(&mut version)?;
         Ok(Self {
             version,
             length: None,

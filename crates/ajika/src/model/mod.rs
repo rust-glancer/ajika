@@ -169,11 +169,14 @@ pub struct Retention {
 pub trait Query: 'static {
     /// Untracked host facilities, such as progress reporting. Semantic values live in [`Inputs`](crate::Inputs).
     type Services: Send + Sync + 'static;
+
     /// Arguments identifying the same logical question across edits, such as a file path.
     /// Avoid including the whole input revision: that creates a different call after every
     /// edit, preventing Ajika from finding the previous answer to validate and compare.
     type Key: Persist + Clone + Eq + Hash + Send + Sync + 'static;
+
     type Value: Send + Sync + 'static;
+
     /// Stable replay name, unique among query implementations for this database's
     /// [`Services`](Query::Services) type. Together with the key, this identifies the same computation
     /// across revisions and restarts.
@@ -183,7 +186,8 @@ pub trait Query: 'static {
     /// there is no reusable answer, or when a transient value must be reconstructed.
     /// Given equal observations, this must produce an equal answer. Do not rely on side effects:
     /// a stored or resident answer skips execution entirely.
-    fn execute(db: &Db<'_, Self::Services>, key: Self::Key) -> Result<Arc<Self::Value>>;
+    fn execute(db: &Db<'_, Self::Services>, key: Self::Key) -> crate::Result<Arc<Self::Value>>;
+
     /// Choose whether the return value can be kept by the backend between operations.
     /// This controls the payload; Ajika can still remember dependencies for a transient value.
     fn storage() -> Storage<Self::Value>;

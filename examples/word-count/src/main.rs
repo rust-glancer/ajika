@@ -1,7 +1,7 @@
 // ANCHOR: queries
 use std::{sync::Arc, time::Duration};
 
-use ajika::{Database, Db, Inputs, Result, Retention};
+use ajika::{Database, Db, Inputs, Retention};
 
 // ANCHOR: declarations
 #[ajika::input(key = String)]
@@ -11,13 +11,13 @@ struct File {
 }
 
 #[ajika::query]
-fn words(db: &Db<'_>, path: String) -> Result<Vec<String>> {
+fn words(db: &Db<'_>, path: String) -> ajika::Result<Vec<String>> {
     let text = File::at(path).text(db)?;
     Ok(text.split_whitespace().map(str::to_owned).collect())
 }
 
 #[ajika::query]
-fn word_count(db: &Db<'_>, path: String) -> Result<usize> {
+fn word_count(db: &Db<'_>, path: String) -> ajika::Result<usize> {
     Ok(words(db, path)?.len())
 }
 // ANCHOR_END: declarations
@@ -26,12 +26,12 @@ fn word_count(db: &Db<'_>, path: String) -> Result<usize> {
 // ANCHOR: forward
 // This convenience query reuses the words query's allocation.
 #[ajika::query(forward)]
-fn note_words(db: &Db<'_>) -> Result<Arc<Vec<String>>> {
+fn note_words(db: &Db<'_>) -> ajika::Result<Arc<Vec<String>>> {
     words(db, "notes.txt".into())
 }
 // ANCHOR_END: forward
 
-fn main() -> Result<()> {
+fn main() -> anyhow::Result<()> {
     // ANCHOR: run
     let limits = Retention {
         max_entries: 10_000,

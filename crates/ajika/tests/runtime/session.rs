@@ -1,6 +1,7 @@
 use std::sync::Arc;
 
-use ajika::{Database, Inputs, Lifetime, Output, Result, Stamp};
+use ajika::{Database, Inputs, Lifetime, Output, Stamp};
+use anyhow::Result;
 
 use super::retention;
 
@@ -15,13 +16,16 @@ struct Document {
     #[input(stamp = Source::stamp, lifetime = Source::lifetime)]
     source: Source,
 }
+
 impl Source {
-    fn stamp(&self) -> Result<Stamp> {
+    fn stamp(&self) -> ajika::Result<Stamp> {
         Ok(Stamp::of(self.text.as_bytes()))
     }
+
     fn lifetime(&self) -> Lifetime {
         self.lifetime
     }
+
     fn capture(self) -> Inputs {
         Inputs::default()
             .edit(|update| Document::at(()).set_source(update, self))
@@ -30,10 +34,11 @@ impl Source {
 }
 
 type Db<'a> = ajika::Db<'a, ()>;
+
 type Outputs = (Output<String>, Output<String>, Output<Vec<u8>>);
 
 #[ajika::query]
-fn document(db: &Db) -> Result<Outputs> {
+fn document(db: &Db) -> ajika::Result<Outputs> {
     let text = Arc::new(Document::at(()).source(db)?.text.to_owned());
     Ok((
         db.output("meaning", Arc::new(text.split_whitespace().collect()))?,
@@ -43,7 +48,7 @@ fn document(db: &Db) -> Result<Outputs> {
 }
 
 #[ajika::query]
-fn answer(db: &Db) -> Result<String> {
+fn answer(db: &Db) -> ajika::Result<String> {
     Ok(format!("answer:{}", document(db)?.0.value(db)?))
 }
 
@@ -209,7 +214,7 @@ fn discarding_editor_work_recovers_the_saved_baseline() -> Result<()> {
 }
 
 #[ajika::query]
-fn page(db: &Db, key: u32) -> Result<String> {
+fn page(db: &Db, key: u32) -> ajika::Result<String> {
     Ok(format!(
         "{key}:{}",
         Document::at(()).source(db)?.text.repeat(256)

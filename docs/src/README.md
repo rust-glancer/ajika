@@ -68,6 +68,7 @@ With Ajika, we can describe the text as an input and these functions as queries:
 
 ```rust
 # extern crate ajika;
+# extern crate anyhow;
 {{#rustdoc_include ../../examples/word-count/src/main.rs:declarations}}
 ```
 

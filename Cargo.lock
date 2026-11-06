@@ -23,6 +23,7 @@ dependencies = [
  "getrandom 0.4.3",
  "inventory",
  "tempfile",
+ "thiserror",
  "tracing",
  "wincode",
 ]
@@ -32,6 +33,7 @@ name = "ajika-editor-session"
 version = "0.1.0"
 dependencies = [
  "ajika",
+ "anyhow",
  "tempfile",
 ]
 
@@ -59,6 +61,7 @@ name = "ajika-outputs"
 version = "0.1.0"
 dependencies = [
  "ajika",
+ "anyhow",
 ]
 
 [[package]]
@@ -66,6 +69,7 @@ name = "ajika-persistence"
 version = "0.1.0"
 dependencies = [
  "ajika",
+ "anyhow",
  "tempfile",
 ]
 
@@ -74,6 +78,7 @@ name = "ajika-word-count"
 version = "0.1.0"
 dependencies = [
  "ajika",
+ "anyhow",
 ]
 
 [[package]]
@@ -96,6 +101,7 @@ dependencies = [
  "lz4_flex",
  "redb",
  "tempfile",
+ "thiserror",
  "tracing",
  "wincode",
  "zstd",

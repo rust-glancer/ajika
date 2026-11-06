@@ -13,16 +13,13 @@ use std::{
     thread,
 };
 
-use super::{
-    Db,
-    coordination::{Coordination, Failure},
-    frame::Frame,
-};
+use super::{Db, coordination::Coordination, frame::Frame};
 use crate::Result;
 
 /// One extra thread taken from the operation's shared worker budget. Returning it on drop lets
 /// later nested batches use that capacity, including when the worker exits by unwinding.
 struct Permit<'a>(&'a AtomicUsize);
+
 impl Drop for Permit<'_> {
     fn drop(&mut self) {
         self.0.fetch_add(1, Ordering::Release);
@@ -32,14 +29,14 @@ impl Drop for Permit<'_> {
 /// A callback-lifetime guard that tells other workers to stop if this worker panics.
 /// Its scope includes application code between query calls, where no query claim is active.
 struct Worker<'a>(&'a Coordination);
+
 impl Drop for Worker<'_> {
     fn drop(&mut self) {
         if thread::panicking() {
             // A callback can panic between query calls, with no claim guard on its
             // stack. Signal other workers before the thread scope starts joining them.
-            self.0.fail(Failure::new(anyhow::anyhow!(
-                "parallel query callback panicked"
-            )));
+            self.0
+                .fail(crate::Error::invariant("parallel query callback panicked"));
         }
     }
 }

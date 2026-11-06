@@ -12,11 +12,10 @@ use std::{
     time::Instant,
 };
 
-use anyhow::Result;
 use redb::{ReadableDatabase, ReadableTable};
 
 use crate::{
-    Database, EncodedValue, Id,
+    Database, EncodedValue, Error, Id, Result,
     format::{
         FrameHeader, IDENTITIES, Location, PACKS, PackHeader, PackId, PackInfo, RECORDS, VALUES,
     },
@@ -49,7 +48,7 @@ impl<'a> Write<'a> {
         let guard = database
             .access
             .try_write()
-            .map_err(|_| anyhow::anyhow!("finish storage reads before starting a write"))?;
+            .map_err(|_| Error::access_conflict("finish storage reads before starting a write"))?;
         database.check()?;
         Ok(Self {
             transaction: database.index.begin_write()?,
@@ -146,7 +145,7 @@ impl<'a> Write<'a> {
                 let table = self.transaction.open_table(PACKS)?;
                 let bytes = table
                     .get(&pack)?
-                    .ok_or_else(|| anyhow::anyhow!("missing pack inventory"))?;
+                    .ok_or_else(|| Error::invalid_cache("missing pack inventory"))?;
                 entry.insert(wincode::deserialize_exact(bytes.value())?);
             }
             let info = self
@@ -156,11 +155,11 @@ impl<'a> Write<'a> {
             info.live_bytes = info
                 .live_bytes
                 .checked_sub(header.frame_length())
-                .ok_or_else(|| anyhow::anyhow!("invalid pack byte count"))?;
+                .ok_or_else(|| Error::invalid_cache("invalid pack byte count"))?;
             info.live_values = info
                 .live_values
                 .checked_sub(1)
-                .ok_or_else(|| anyhow::anyhow!("invalid pack value count"))?;
+                .ok_or_else(|| Error::invalid_cache("invalid pack value count"))?;
         }
         Ok(())
     }
@@ -198,7 +197,7 @@ impl<'a> Write<'a> {
         let committing = Instant::now();
         if let Err(error) = self.transaction.commit() {
             self.database.healthy.store(false, Ordering::Release);
-            return Err(error.into());
+            return Err(Error::from(error).require_reopen());
         }
         let commit_time = committing.elapsed();
         if !self.changed_packs.is_empty() {
@@ -235,10 +234,9 @@ pub struct Read<'a> {
 
 impl<'a> Read<'a> {
     pub(crate) fn new(database: &'a Database) -> Result<Self> {
-        let guard = database
-            .access
-            .try_read()
-            .map_err(|_| anyhow::anyhow!("finish the storage write before starting a read"))?;
+        let guard = database.access.try_read().map_err(|_| {
+            Error::access_conflict("finish the storage write before starting a read")
+        })?;
         database.check()?;
         Ok(Self {
             transaction: database.index.begin_read()?,
@@ -283,12 +281,14 @@ impl<'a> Read<'a> {
             let table = self.transaction.open_table(VALUES)?;
             let value = table
                 .get(id)?
-                .ok_or_else(|| anyhow::anyhow!("missing stored value"))?;
+                .ok_or_else(|| Error::invalid_cache("missing stored value"))?;
             wincode::deserialize_exact(value.value())?
         };
         match location {
             Location::Inline(bytes) => {
-                anyhow::ensure!(bytes.len() as u64 == length, "invalid inline value length");
+                if !(bytes.len() as u64 == length) {
+                    return Err(Error::invalid_cache("invalid inline value length"));
+                }
                 Ok(bytes)
             }
             Location::Pack {
@@ -296,31 +296,36 @@ impl<'a> Read<'a> {
                 offset,
                 header,
             } => {
-                anyhow::ensure!(
-                    &header.id == id && header.raw_length == length,
-                    "invalid value identity or length"
-                );
+                if !(&header.id == id && header.raw_length == length) {
+                    return Err(Error::invalid_cache("invalid value identity or length"));
+                }
                 let table = self.transaction.open_table(PACKS)?;
                 let info: PackInfo = wincode::deserialize_exact(
                     table
                         .get(&pack)?
-                        .ok_or_else(|| anyhow::anyhow!("missing pack inventory"))?
+                        .ok_or_else(|| Error::invalid_cache("missing pack inventory"))?
                         .value(),
                 )?;
                 let end = offset
                     .checked_add(header.frame_length())
-                    .ok_or_else(|| anyhow::anyhow!("invalid pack range"))?;
-                anyhow::ensure!(
-                    offset >= PackHeader::LENGTH && end <= info.length,
-                    "invalid pack range"
-                );
+                    .ok_or_else(|| Error::invalid_cache("invalid pack range"))?;
+                if !(offset >= PackHeader::LENGTH && end <= info.length) {
+                    return Err(Error::invalid_cache("invalid pack range"));
+                }
                 let file = {
                     let mut files = self.database.files.lock().expect("pack handles");
                     if let Some((_, file)) = files.iter().find(|(id, _)| id == &pack) {
                         file.clone()
                     } else {
-                        let file =
-                            Arc::new(File::open(PackWriter::path(&self.database.packs, &pack))?);
+                        let path = PackWriter::path(&self.database.packs, &pack);
+                        let file = Arc::new(File::open(&path).map_err(|source| {
+                            let error = if source.kind() == io::ErrorKind::NotFound {
+                                Error::invalid_source(source)
+                            } else {
+                                Error::from(source)
+                            };
+                            error.at(path)
+                        })?);
                         if files.len() == 16 {
                             files.remove(0);
                         }
@@ -331,15 +336,16 @@ impl<'a> Read<'a> {
                 let mut framing = [0; FrameHeader::LENGTH as usize];
                 Self::read_exact_at(&file, &mut framing, offset)?;
                 let frame: FrameHeader = wincode::deserialize_exact(&framing)?;
-                anyhow::ensure!(frame == header, "invalid stored frame header");
+                if !(frame == header) {
+                    return Err(Error::invalid_cache("invalid stored frame header"));
+                }
                 // Read the payload into its own allocation, avoiding a full-value memmove to
                 // remove a framing prefix before returning an uncompressed value.
                 let mut bytes = vec![0; usize::try_from(header.stored_length)?];
                 Self::read_exact_at(&file, &mut bytes, offset + FrameHeader::LENGTH)?;
-                anyhow::ensure!(
-                    blake3::hash(&bytes).as_bytes() == &header.checksum,
-                    "invalid stored value checksum"
-                );
+                if !(blake3::hash(&bytes).as_bytes() == &header.checksum) {
+                    return Err(Error::invalid_cache("invalid stored value checksum"));
+                }
                 header.compression.decode(bytes, length)
             }
         }

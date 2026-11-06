@@ -83,7 +83,7 @@ impl Frame {
         let value = value
             .clone()
             .downcast()
-            .map_err(|_| anyhow::anyhow!("query value type changed"))?;
+            .map_err(|_| crate::Error::invariant("query value type changed"))?;
         acquired.hits += 1;
         Ok(Some(value))
     }
@@ -204,10 +204,9 @@ impl Reads {
         // Outputs emitted directly by callbacks belong to the same producer. Their slots must
         // be unique across branches too; nested queries keep their outputs in their own frames.
         for (slot, value) in branch.outputs {
-            anyhow::ensure!(
-                self.outputs.insert(slot, value).is_none(),
-                "query emitted an output slot twice"
-            );
+            if !(self.outputs.insert(slot, value).is_none()) {
+                return Err(crate::Error::contract("query emitted an output slot twice"));
+            }
         }
         Ok(())
     }

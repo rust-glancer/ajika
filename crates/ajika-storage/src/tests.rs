@@ -252,11 +252,12 @@ fn an_exhausted_budget_still_allows_reclamation_and_reads() -> Result<()> {
         },
     )?;
     let mut pending = database.begin_write()?;
-    assert!(
+    assert_eq!(
         pending
             .write_value(&[3; 32], Compression::None.encode(vec![3; 32_000])?)
             .expect_err("new values exceed the budget")
-            .is::<crate::StorageFull>()
+            .kind(),
+        crate::ErrorKind::Capacity
     );
     drop(pending);
     let mut write = database.begin_write()?;

@@ -7,8 +7,8 @@ use std::{
     thread,
 };
 
-use ajika::{Cancelled, Database, Inputs, QueryCycle, Result, Retention};
-use anyhow::Context as _;
+use ajika::{Database, Inputs, QueryCycle, ResultExt as _, Retention};
+use anyhow::Result;
 
 use super::{Sources, inputs, leaf, retention, symbols, tree};
 
@@ -16,7 +16,9 @@ struct Control {
     enabled: AtomicBool,
     entered: Barrier,
 }
+
 type Db<'a> = ajika::Db<'a, Arc<Control>>;
+
 #[ajika::input(key = (), lifetime = Operation)]
 struct OperationControl {
     enabled: bool,
@@ -31,7 +33,7 @@ fn control_inputs(control: &Control) -> Inputs {
 }
 
 #[ajika::query]
-fn wait_for_cancellation(db: &Db) -> Result<u32> {
+fn wait_for_cancellation(db: &Db) -> ajika::Result<u32> {
     if OperationControl::at(()).enabled(db)? {
         db.services().entered.wait();
         loop {
@@ -65,11 +67,7 @@ fn cancelling_parallel_demands_drains_them_and_the_next_operation_can_retry() ->
         });
         db.run(|db| db.parallel_map(&[(), ()], |db, _| wait_for_cancellation(db)))
     });
-    assert!(
-        result
-            .expect_err("operation was cancelled")
-            .is::<Cancelled>()
-    );
+    assert!(result.expect_err("operation was cancelled").is_cancelled());
     control.enabled.store(false, Ordering::Release);
     db.replace_inputs(control_inputs(&control));
     assert_eq!(*db.run(wait_for_cancellation)?, 42);
@@ -89,7 +87,7 @@ fn cancelling_parallel_demands_drains_them_and_the_next_operation_can_retry() ->
 }
 
 #[ajika::query]
-fn may_panic(db: &Db) -> Result<u32> {
+fn may_panic(db: &Db) -> ajika::Result<u32> {
     if OperationControl::at(()).enabled(db)? {
         panic!("test provider unwound");
     }
@@ -113,7 +111,7 @@ fn an_unwinding_provider_leaves_no_claim_or_uncommitted_value() -> Result<()> {
 }
 
 #[ajika::query(forward)]
-fn mutually_recursive(db: &Db, key: u32) -> Result<Arc<u32>> {
+fn mutually_recursive(db: &Db, key: u32) -> ajika::Result<Arc<u32>> {
     if OperationControl::at(()).enabled(db)? {
         db.services().entered.wait();
         return recursive_peer(db, 1 - key).context("building declarations");
@@ -122,15 +120,15 @@ fn mutually_recursive(db: &Db, key: u32) -> Result<Arc<u32>> {
 }
 
 #[ajika::query(forward)]
-fn recursive_peer(db: &Db, key: u32) -> Result<Arc<u32>> {
+fn recursive_peer(db: &Db, key: u32) -> ajika::Result<Arc<u32>> {
     mutually_recursive(db, key).context("resolving associated items")
 }
 
-fn cycle_in(error: &anyhow::Error) -> &QueryCycle {
-    error
-        .chain()
-        .find_map(|cause| cause.downcast_ref::<QueryCycle>())
-        .expect("structured cycle survives worker failures")
+fn cycle_in(error: &ajika::Error) -> &QueryCycle {
+    match error.kind() {
+        ajika::ErrorKind::Cycle(cycle) => cycle,
+        _ => panic!("expected structured cycle"),
+    }
 }
 
 #[test]
@@ -141,7 +139,7 @@ fn a_cross_worker_cycle_finishes_and_does_not_poison_the_next_operation() -> Res
     });
     let mut db = Database::memory(control_inputs(&control), control.clone(), retention());
     db.set_parallelism(2);
-    let result: Result<()> = db.run(|db| {
+    let result: ajika::Result<()> = db.run(|db| {
         let error = db
             .parallel_map(&[0, 1], |db, key| mutually_recursive(db, *key))
             .expect_err("queries form a cycle");
@@ -154,7 +152,7 @@ fn a_cross_worker_cycle_finishes_and_does_not_poison_the_next_operation() -> Res
     let error = result.expect_err("queries form a cycle");
     let cycle = cycle_in(&error);
     assert_eq!(error.to_string(), "building declarations");
-    let report = format!("{error:#}");
+    let report = format!("{:#}", anyhow::Error::new(error.clone()));
     assert!(report.contains("resolving associated items"));
     assert!(report.contains("query cycle:"));
     assert_eq!(cycle.calls.len(), 5);
@@ -193,7 +191,7 @@ fn a_panicking_parallel_callback_wakes_other_callbacks_before_joining() -> Resul
     let entered = Barrier::new(2);
     let panic = panic::catch_unwind(panic::AssertUnwindSafe(|| {
         db.run(|db| {
-            db.parallel_map(&[0, 1], |db, key| -> Result<()> {
+            db.parallel_map(&[0, 1], |db, key| -> ajika::Result<()> {
                 entered.wait();
                 if *key == 0 {
                     panic!("callback failed outside a query");
@@ -206,7 +204,7 @@ fn a_panicking_parallel_callback_wakes_other_callbacks_before_joining() -> Resul
         })
     }));
     assert!(panic.is_err());
-    assert_eq!(db.run(|_| Ok(42))?, 42);
+    assert_eq!(db.run(|_| { Ok(42) })?, 42);
     Ok(())
 }
 
@@ -217,11 +215,24 @@ fn a_failed_operation_discards_new_work_but_keeps_the_previous_checkpoint() -> R
     let mut db = Database::open(&path, "test", inputs("old"), (), retention())?;
     db.run(|db| symbols(db, 1))?;
     db.replace_inputs(inputs("new"));
-    let failed: Result<()> = db.run(|db| {
+    #[derive(Debug, thiserror::Error)]
+    #[error("candidate rejected with code {0}")]
+    struct Rejected(u32);
+    let failed: ajika::Result<()> = db.run(|db| {
         symbols(db, 1)?;
-        anyhow::bail!("discard this operation")
+        Err(ajika::Error::application(Rejected(42)))
     });
-    assert!(failed.is_err());
+    let error = failed.expect_err("host rejected the candidate");
+    let ajika::ErrorKind::Application(source) = error.kind() else {
+        panic!("expected application rejection");
+    };
+    assert_eq!(
+        source
+            .downcast_ref::<Rejected>()
+            .expect("application rejection")
+            .0,
+        42
+    );
     drop(db);
 
     let mut db = Database::open(&path, "test", inputs("old"), (), retention())?;

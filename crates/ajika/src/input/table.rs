@@ -39,7 +39,9 @@ impl<T: Input> Value<T> {
 
 pub(super) trait ErasedTable: Any + Send + Sync {
     fn fork(&self) -> Arc<dyn ErasedTable>;
+
     fn changed(&self, current: &Inputs, previous: &Inputs) -> Option<Durability>;
+
     fn bytes(&self) -> usize;
 }
 

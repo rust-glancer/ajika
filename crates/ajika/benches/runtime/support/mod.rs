@@ -5,7 +5,7 @@ pub(crate) mod workload;
 
 use std::{fmt, sync::Arc, time::Duration};
 
-use ajika::{Database, Result, Retention};
+use ajika::{Database, Retention};
 use divan::{Bencher, black_box};
 
 use self::workload::{Edit, Sources};
@@ -123,7 +123,7 @@ impl Fixture {
     pub(crate) fn bench<R>(
         bencher: Bencher,
         prepare: impl Fn() -> Self,
-        work: impl Fn(&mut Self) -> Result<R>,
+        work: impl Fn(&mut Self) -> ajika::Result<R>,
         check: impl Fn(&Self, &R),
     ) {
         {

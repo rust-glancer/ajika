@@ -66,10 +66,12 @@ impl Subscriber for Recorder {
 
     fn event(&self, event: &Event<'_>) {
         struct Fields(BTreeMap<&'static str, String>);
+
         impl Visit for Fields {
             fn record_str(&mut self, field: &Field, value: &str) {
                 self.0.insert(field.name(), value.to_owned());
             }
+
             fn record_debug(&mut self, field: &Field, value: &dyn fmt::Debug) {
                 self.0.insert(field.name(), format!("{value:?}"));
             }
@@ -87,14 +89,18 @@ impl Subscriber for Recorder {
     fn new_span(&self, _: &span::Attributes<'_>) -> span::Id {
         span::Id::from_u64(1)
     }
+
     fn record(&self, _: &span::Id, _: &span::Record<'_>) {}
+
     fn record_follows_from(&self, _: &span::Id, _: &span::Id) {}
+
     fn enter(&self, _: &span::Id) {}
+
     fn exit(&self, _: &span::Id) {}
 }
 
 #[test]
-fn filtering_diagnostics_keeps_info_quiet_and_trace_opt_in() -> ajika::Result<()> {
+fn filtering_diagnostics_keeps_info_quiet_and_trace_opt_in() -> anyhow::Result<()> {
     for level in [Level::INFO, Level::DEBUG, Level::TRACE] {
         let mut db = ajika::Database::memory(super::inputs("hello"), (), super::retention());
         let (result, events) = capture(level, || db.run(|db| super::symbols(db, 1)));
@@ -132,7 +138,7 @@ fn keyed(db: &super::Db) -> ajika::Result<Vec<ajika::Output<u32>>> {
 }
 
 #[test]
-fn keyed_slots_have_opaque_identities_shared_by_emission_and_reads() -> ajika::Result<()> {
+fn keyed_slots_have_opaque_identities_shared_by_emission_and_reads() -> anyhow::Result<()> {
     let mut db = ajika::Database::memory(super::inputs(""), (), super::retention());
     let (result, events) = capture(Level::TRACE, || {
         db.run(|db| {

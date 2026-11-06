@@ -30,7 +30,9 @@ use crate::{Durability, Lifetime, Persist, Result, Stamp};
 /// must cover everything queries can observe; mutable residency bookkeeping is not logical data.
 pub trait Input: 'static {
     type Key: Persist + Clone + Eq + Hash + Send + Sync + 'static;
+
     type Value: Clone + Send + Sync + 'static;
+
     const NAME: &'static str;
 
     fn stamp(value: &Self::Value) -> Result<Stamp>;
@@ -39,12 +41,13 @@ pub trait Input: 'static {
     /// Concurrent acquisitions may race; all readers receive the first value installed in the
     /// snapshot. No runtime lock is held while this function performs I/O.
     fn initialize(_key: &Self::Key) -> Result<Self::Value> {
-        anyhow::bail!("input has not been supplied: {}", Self::NAME)
+        Err(crate::UnavailableData::Input { name: Self::NAME }.into())
     }
 
     fn durability(_value: &Self::Value) -> Durability {
         Durability::Low
     }
+
     fn lifetime(_value: &Self::Value) -> Lifetime {
         Lifetime::Persistent
     }
@@ -54,18 +57,22 @@ pub trait Input: 'static {
 /// expose these selectors as constants, for example `File::SOURCE`. Query code normally uses
 /// the corresponding `file.source(db)` getter instead.
 pub struct Field<T: Input>(PhantomData<fn() -> T>);
+
 impl<T: Input> Copy for Field<T> {}
+
 impl<T: Input> Clone for Field<T> {
     fn clone(&self) -> Self {
         *self
     }
 }
+
 impl<T: Input> Field<T> {
     #[doc(hidden)]
     pub const fn new() -> Self {
         Self(PhantomData)
     }
 }
+
 impl<T: Input> Default for Field<T> {
     fn default() -> Self {
         Self::new()
@@ -201,11 +208,12 @@ impl Inputs {
                     Some(value) => {
                         let (new_key, new_value) = relocate(key, &value.value);
                         let new_value = Value::<T>::new(new_value)?;
-                        anyhow::ensure!(
-                            new_key == *key && new_value.record == value.record,
-                            "relocation changed input {}",
-                            T::NAME
-                        );
+                        if !(new_key == *key && new_value.record == value.record) {
+                            return Err(crate::Error::contract(format!(
+                                "relocation changed input {}",
+                                T::NAME
+                            )));
+                        }
                         relocated.insert(new_key, Some(new_value));
                         continue;
                     }

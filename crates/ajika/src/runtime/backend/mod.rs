@@ -163,10 +163,11 @@ impl Backend {
     /// Stop further reuse after a failed storage-changing operation. This checks the backend's
     /// health, separately from cancellation or failure of one query operation.
     pub(crate) fn check(&self) -> Result<()> {
-        anyhow::ensure!(
-            self.usable.load(Ordering::Acquire),
-            "reopen query storage after its failed write"
-        );
+        if !(self.usable.load(Ordering::Acquire)) {
+            return Err(crate::Error::unavailable_storage(
+                "reopen query storage after its failed write",
+            ));
+        }
         Ok(())
     }
 
@@ -237,8 +238,8 @@ impl Backend {
         header: &RecordHeader,
         slot: &Slot,
         codec: Codec,
-        check: &dyn Fn() -> Result<()>,
-    ) -> Result<Option<(Value, bool)>> {
+        check: &dyn Fn() -> crate::Result<()>,
+    ) -> crate::Result<Option<(Value, bool)>> {
         self.check()?;
         if header.lifetime == Lifetime::Operation {
             return Ok(None);
@@ -371,8 +372,8 @@ impl Backend {
         now: u64,
         parallelism: usize,
         stats: &mut Statistics,
-        check: &dyn Fn() -> Result<()>,
-    ) -> Result<()> {
+        check: &dyn Fn() -> crate::Result<()>,
+    ) -> crate::Result<()> {
         self.check()?;
         let dirty = memos
             .iter()
@@ -561,12 +562,14 @@ impl Backend {
             }
             Ok(())
         })();
-        if result.as_ref().is_err_and(|error: &anyhow::Error| {
-            !error.is::<super::Cancelled>() && !error.is::<storage::StorageFull>()
-        }) {
-            self.usable.store(false, Ordering::Release);
-        }
-        result
+        result.map_err(|error: crate::Error| {
+            if !error.is_cancelled() && !error.is_capacity() {
+                self.usable.store(false, Ordering::Release);
+                error.require_reopen()
+            } else {
+                error
+            }
+        })
     }
 
     pub(crate) fn session_usage(&self) -> (u64, u64) {
@@ -621,7 +624,7 @@ impl Backend {
                 bytes -= item.bytes;
             }
         }
-        let result = (|| {
+        let result: Result<()> = (|| {
             match &self.store {
                 Store::Memory(store) => {
                     let mut store = store.lock().expect("memory storage");
@@ -667,7 +670,7 @@ impl Backend {
         })();
         if let Err(error) = result {
             self.usable.store(false, Ordering::Release);
-            return Err(error);
+            return Err(error.require_reopen());
         }
         // Stored removals succeeded. A failed pass must not advance this bookkeeping as if
         // its removals had been saved, so update the in-memory inventory only afterward.
@@ -704,19 +707,18 @@ impl Backend {
     pub(crate) fn compact(&mut self) -> Result<bool> {
         match &mut self.store {
             Store::Memory(_) => Ok(false),
-            Store::Disk(database) => database.compact(),
+            Store::Disk(database) => Ok(database.compact()?),
         }
     }
 
     /// Storage relocation changes no logical query state. Run it outside the evaluator's
     /// working scope so there are no disk readers or query workers to coordinate with.
     pub(crate) fn maintain(&self) -> Result<()> {
-        if let Store::Disk(database) = &self.store {
-            let result = database.maintain();
-            if result.is_err() {
-                self.usable.store(false, Ordering::Release);
-            }
-            result?;
+        if let Store::Disk(database) = &self.store
+            && let Err(error) = database.maintain()
+        {
+            self.usable.store(false, Ordering::Release);
+            return Err(crate::Error::from(error).require_reopen());
         }
         Ok(())
     }
