@@ -20,6 +20,12 @@ test-docs:
 test-replay *args:
     cargo nextest run --manifest-path {{replay_manifest}} --target-dir target --release --locked "$@"
 
+# Run both Divan suites; pass --test to check every scenario without sampling.
+[positional-arguments]
+bench *args:
+    cargo bench -p ajika --bench runtime --locked -- "$@"
+    cargo bench -p ajika_storage --bench storage --locked -- "$@"
+
 [positional-arguments]
 fmt *args:
     cargo +{{rustfmt_toolchain}} fmt --all "$@"

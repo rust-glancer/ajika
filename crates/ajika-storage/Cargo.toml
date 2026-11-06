@@ -18,7 +18,13 @@ wincode = { workspace = true, features = ["derive"] }
 zstd.workspace = true
 
 [dev-dependencies]
+divan.workspace = true
 tempfile.workspace = true
+
+[[bench]]
+name = "storage"
+path = "benches/storage/mod.rs"
+harness = false
 
 [lints]
 workspace = true

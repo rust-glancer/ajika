@@ -36,6 +36,7 @@ ajika_storage = { path = "crates/ajika-storage", version = "0.1.0" }
 
 anyhow = "1.0.103"
 blake3 = "1.8.5"
+divan = { package = "codspeed-divan-compat", version = "4.7.0" }
 getrandom = "0.4.3"
 inventory = "0.3.25"
 lz4_flex = { version = "0.14.0", default-features = false }
