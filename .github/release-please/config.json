@@ -1,0 +1,50 @@
+{
+  "$schema": "https://raw.githubusercontent.com/googleapis/release-please/main/schemas/config.json",
+  "bootstrap-sha": "e5b149c32802d80012986136939ac62a9e07c79a",
+  "release-type": "simple",
+  "version-file": ".github/release-please/version.txt",
+  "include-component-in-tag": false,
+  "include-v-in-tag": true,
+  "bump-minor-pre-major": true,
+  "bump-patch-for-minor-pre-major": true,
+  "extra-files": [
+    {
+      "type": "toml",
+      "path": "Cargo.toml",
+      "jsonpath": "$.workspace.package.version"
+    },
+    {
+      "type": "toml",
+      "path": "Cargo.toml",
+      "jsonpath": "$.workspace.dependencies.ajika.version"
+    },
+    {
+      "type": "toml",
+      "path": "Cargo.toml",
+      "jsonpath": "$.workspace.dependencies.ajika_macros.version"
+    },
+    {
+      "type": "toml",
+      "path": "Cargo.toml",
+      "jsonpath": "$.workspace.dependencies.ajika_storage.version"
+    },
+    {
+      "type": "toml",
+      "path": "Cargo.lock",
+      "jsonpath": "$.package[?(!@.source)].version"
+    },
+    {
+      "type": "toml",
+      "path": "crates/ajika/tests/registry-fixture/Cargo.toml",
+      "jsonpath": "$.workspace.dependencies.ajika.version"
+    },
+    {
+      "type": "toml",
+      "path": "crates/ajika/tests/registry-fixture/Cargo.lock",
+      "jsonpath": "$.package[?(@.name.value == 'ajika' || @.name.value == 'ajika_macros' || @.name.value == 'ajika_storage')].version"
+    }
+  ],
+  "packages": {
+    ".": {}
+  }
+}
