@@ -215,6 +215,20 @@ impl From<io::Error> for Error {
     }
 }
 
+impl From<redb::DatabaseError> for Error {
+    fn from(source: redb::DatabaseError) -> Self {
+        match source {
+            // redb reports bad magic and empty existing indexes as InvalidData during open.
+            redb::DatabaseError::Storage(redb::StorageError::Io(source))
+                if source.kind() == io::ErrorKind::InvalidData =>
+            {
+                Self::invalid_source(source)
+            }
+            source => redb::Error::from(source).into(),
+        }
+    }
+}
+
 impl From<redb::Error> for Error {
     fn from(source: redb::Error) -> Self {
         // redb's operation-specific wrappers flatten into this enum. Normalize here rather
@@ -253,7 +267,6 @@ impl From<redb::Error> for Error {
 }
 
 index_error!(
-    redb::DatabaseError,
     redb::StorageError,
     redb::TableError,
     redb::TransactionError,

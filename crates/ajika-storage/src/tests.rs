@@ -352,3 +352,42 @@ fn reloading_a_stopped_owner_keeps_its_checkpoint_and_lock() -> Result<()> {
     ));
     Ok(())
 }
+
+#[test]
+fn opening_rebuilds_a_damaged_index() -> Result<()> {
+    let root = tempfile::tempdir()?;
+    std::fs::write(root.path().join("index.redb"), b"damaged header")?;
+
+    let database = Database::open(root.path(), "fixture", Options::default())?;
+    let write = database.begin_write()?;
+    write.set_metadata(&[1; 32], b"rebuilt checkpoint")?;
+    write.commit()?;
+    assert_eq!(
+        database.snapshot()?.metadata(&[1; 32])?.as_deref(),
+        Some(b"rebuilt checkpoint".as_slice())
+    );
+    Ok(())
+}
+
+#[cfg(unix)]
+#[test]
+fn rebuilding_an_empty_index_restores_supplied_identities() -> Result<()> {
+    let root = tempfile::tempdir()?;
+    let mut database = Database::open(root.path(), "fixture", Options::default())?;
+    let index = root.path().join("index.redb");
+    // Move the old inode aside so closing its redb handle cannot change the empty file.
+    std::fs::rename(&index, root.path().join("previous.redb"))?;
+    std::fs::File::create(index)?;
+    database.reopen().expect_err("the existing index is empty");
+
+    database.rebuild(&[crate::Identity {
+        namespace: "files",
+        id: 0,
+        key: b"src/lib.rs",
+    }])?;
+    assert_eq!(
+        database.snapshot()?.identities()?,
+        vec![("files".into(), 0, b"src/lib.rs".to_vec())]
+    );
+    Ok(())
+}
