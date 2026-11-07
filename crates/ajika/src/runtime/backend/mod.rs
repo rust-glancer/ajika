@@ -97,22 +97,18 @@ impl Backend {
             &format!("query-runtime-3:{epoch}"),
             Options::default(),
         )?;
-        let interner = match Self::load_interner(&mut database) {
-            Ok(interner) => interner,
+        let (interner, usage) = match Self::load_interner(&mut database) {
+            Ok(interner) => {
+                let loaded = Self::load_usage(&database);
+                let usage = Self::reuse_or_rebuild_usage(&mut database, &interner, loaded)?;
+                (interner, usage)
+            }
             Err(error) if error.is_invalid_cache() => {
-                database.rebuild(&[])?;
-                tracing::warn!(
-                    %error,
-                    cause = error.source().map(tracing::field::display),
-                    path = %database.path().display(),
-                    identities_discarded = true,
-                    "discarded corrupt cache contents"
-                );
-                crate::Interner::default()
+                let usage = Self::rebuild_corrupt_cache(&mut database, None, &error)?;
+                (crate::Interner::default(), usage)
             }
             Err(error) => return Err(error),
         };
-        let usage = Self::restore_usage(&mut database, &interner, Ok(()))?;
         let bytes = usage.values().map(|item| item.bytes).sum();
         Ok(Self {
             interner,
@@ -142,26 +138,36 @@ impl Backend {
         crate::Interner::load(assignments)
     }
 
-    /// Restore retention bookkeeping or rebuild a corrupt cache with the live IDs.
-    fn restore_usage(
+    fn reuse_or_rebuild_usage(
         database: &mut StorageDatabase,
         interner: &crate::Interner,
-        loaded: Result<()>,
+        loaded: Result<HashMap<Id, Usage>>,
     ) -> Result<HashMap<Id, Usage>> {
-        match loaded.and_then(|()| Self::load_usage(database)) {
+        match loaded {
             Err(error) if error.is_invalid_cache() => {
-                interner.rebuild(database)?;
-                tracing::warn!(
-                    %error,
-                    cause = error.source().map(tracing::field::display),
-                    path = %database.path().display(),
-                    identities_discarded = false,
-                    "discarded corrupt cache contents"
-                );
-                Ok(HashMap::new())
+                Self::rebuild_corrupt_cache(database, Some(interner), &error)
             }
             result => result,
         }
+    }
+
+    fn rebuild_corrupt_cache(
+        database: &mut StorageDatabase,
+        interner: Option<&crate::Interner>,
+        error: &Error,
+    ) -> Result<HashMap<Id, Usage>> {
+        match interner {
+            Some(interner) => interner.rebuild(database)?,
+            None => database.rebuild(&[])?,
+        }
+        tracing::warn!(
+            %error,
+            cause = error.source().map(tracing::field::display),
+            path = %database.path().display(),
+            identities_discarded = interner.is_none(),
+            "discarded corrupt cache contents"
+        );
+        Ok(HashMap::new())
     }
 
     fn load_usage(database: &StorageDatabase) -> Result<HashMap<Id, Usage>> {
@@ -196,16 +202,17 @@ impl Backend {
         };
         // Reopen after an uncertain commit to find the published checkpoint. Payload
         // checksums are verified on read, so known corruption goes straight to a rebuild.
-        let loaded = if reason.storage_needs_reopen() {
-            (|| {
-                database.reopen()?;
-                self.interner.reconcile(&database.snapshot()?.identities()?)
-            })()
+        let interner = &self.interner;
+        let usage = if reason.storage_needs_reopen() {
+            let reopened = database.reopen().map_err(Error::from).and_then(|()| {
+                interner.reconcile(&database.snapshot()?.identities()?)?;
+                Self::load_usage(database)
+            });
+            Self::reuse_or_rebuild_usage(database, interner, reopened)?
         } else {
-            Err(reason)
+            Self::rebuild_corrupt_cache(database, Some(interner), &reason)?
         };
-        // Leave repair pending until this succeeds so the next run can retry a temporary failure.
-        let usage = Self::restore_usage(database, &self.interner, loaded)?;
+        // Leave repair pending until success so the next run can retry a temporary failure.
         self.replace_usage(usage);
         self.recovery.take();
         Ok(())
