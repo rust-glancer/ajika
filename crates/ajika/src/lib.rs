@@ -10,7 +10,6 @@ mod input;
 mod interner;
 mod model;
 mod runtime;
-use ajika_storage as storage;
 
 #[doc(hidden)]
 pub mod __private;
@@ -22,14 +21,13 @@ pub mod __private;
 #[doc(inline)]
 pub use ajika_macros::query;
 pub use ajika_macros::{input, interned, output, register};
-pub use ajika_storage::{Compression, Statistics as StorageStatistics};
+pub use ajika_storage::{
+    Compression, ErrorKind as PersistenceErrorKind, Statistics as StorageStatistics,
+};
 
 pub use self::{
     codec::Persist,
-    error::{
-        Cancelled, Error, ErrorKind, PersistenceError, PersistenceKind, Result, ResultExt,
-        UnavailableData,
-    },
+    error::{Cancelled, Error, ErrorKind, PersistenceError, Result, ResultExt, UnavailableData},
     input::{Field, Input, InputUpdate, Inputs},
     interner::Interner,
     model::{Durability, Lifetime, Query, Retention, Stamp, Statistics, Storage},

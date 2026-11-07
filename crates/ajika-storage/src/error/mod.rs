@@ -91,11 +91,7 @@ impl Error {
 
     /// The I/O error remains directly accessible even when it originated inside redb or decoding.
     pub fn io_error(&self) -> Option<&io::Error> {
-        match &self.inner.cause {
-            Cause::Io { source, .. } => Some(source),
-            Cause::Source { source, .. } => source.downcast_ref(),
-            _ => None,
-        }
+        self.source()?.downcast_ref()
     }
 
     pub(crate) fn in_use() -> Self {
@@ -169,11 +165,7 @@ impl fmt::Display for Error {
 
 impl StdError for Error {
     fn source(&self) -> Option<&(dyn StdError + 'static)> {
-        match &self.inner.cause {
-            Cause::Message(_) => None,
-            Cause::Source { source, .. } => Some(source.as_ref()),
-            Cause::Io { source, .. } => Some(source),
-        }
+        self.inner.cause.source()
     }
 }
 
@@ -241,30 +233,6 @@ index_error!(
     redb::CommitError,
     redb::CompactionError
 );
-
-impl From<wincode::ReadError> for Error {
-    fn from(source: wincode::ReadError) -> Self {
-        Self::invalid_source(source)
-    }
-}
-
-impl From<wincode::WriteError> for Error {
-    fn from(source: wincode::WriteError) -> Self {
-        Self::unexpected(source)
-    }
-}
-
-impl From<std::num::TryFromIntError> for Error {
-    fn from(source: std::num::TryFromIntError) -> Self {
-        Self::invalid_source(source)
-    }
-}
-
-impl From<std::array::TryFromSliceError> for Error {
-    fn from(source: std::array::TryFromSliceError) -> Self {
-        Self::invalid_source(source)
-    }
-}
 
 impl From<getrandom::Error> for Error {
     fn from(source: getrandom::Error) -> Self {

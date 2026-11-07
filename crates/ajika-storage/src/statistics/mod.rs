@@ -13,7 +13,7 @@ use redb::{ReadableDatabase, ReadableTable};
 
 use crate::{
     Database, Error, Result,
-    format::{IDENTITIES, Location, PACKS, PackHeader, PackInfo, RECORDS, VALUES},
+    format::{self, IDENTITIES, Location, PACKS, PackHeader, PackInfo, RECORDS, VALUES},
 };
 
 /// Logical contents and filesystem usage at the same observation boundary.
@@ -68,7 +68,7 @@ impl Statistics {
             let (_, value) = entry?;
             stats.values += 1;
             stats.location_bytes += value.value().len() as u64;
-            let raw_length = match wincode::deserialize_exact::<Location>(value.value())? {
+            let raw_length = match format::decode::<Location>(value.value())? {
                 Location::Inline(bytes) => {
                     stats.inline_bytes += bytes.len() as u64;
                     stats.inline_values += 1;
@@ -87,7 +87,7 @@ impl Statistics {
         }
         for entry in read.open_table(PACKS)?.iter()? {
             let (_, value) = entry?;
-            let info: PackInfo = wincode::deserialize_exact(value.value())?;
+            let info: PackInfo = format::decode(value.value())?;
             stats.dead_pack_bytes += info.length - PackHeader::LENGTH - info.live_bytes;
         }
         let index = fs::metadata(path.join("index.redb"))?;

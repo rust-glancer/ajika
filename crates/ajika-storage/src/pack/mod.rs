@@ -86,7 +86,7 @@ impl PackWriter {
             writer.write_all(&buffer[..length])?;
             remaining -= length as u64;
         }
-        if !(hash.finalize().as_bytes() == &expected) {
+        if hash.finalize().as_bytes() != &expected {
             return Err(Error::invalid_cache("invalid stored value checksum"));
         }
         self.failed = false;
@@ -109,7 +109,7 @@ impl PackWriter {
     /// partial prefix in the file; finish must then reject publication even if its caller
     /// caught the error and tried to commit the surrounding transaction.
     fn begin_frame(&mut self, header: FrameHeader) -> Result<Location> {
-        if !(!self.failed) {
+        if self.failed {
             return Err(Error::unavailable(
                 "discard storage write after its failed append",
             ));
@@ -130,7 +130,7 @@ impl PackWriter {
             let file = File::create_new(&path)?;
             self.created.push(path);
             let mut writer = BufWriter::with_capacity(64 * 1024, file);
-            writer.write_all(&wincode::serialize(&PackHeader {
+            writer.write_all(&format::encode(&PackHeader {
                 magic: PackHeader::MAGIC,
                 instance: self.instance,
                 pack: id,
@@ -143,7 +143,7 @@ impl PackWriter {
         }
         let pack = self.current.as_mut().expect("pack created");
         let offset = pack.length;
-        pack.writer.write_all(&wincode::serialize(&header)?)?;
+        pack.writer.write_all(&format::encode(&header)?)?;
         pack.length += header.frame_length();
         Ok(Location::Pack {
             pack: pack.id,
@@ -164,7 +164,7 @@ impl PackWriter {
 
     /// Complete the bytes and file names before the index commit can name them.
     pub(crate) fn finish(&mut self) -> Result<Duration> {
-        if !(!self.failed) {
+        if self.failed {
             return Err(Error::unavailable(
                 "discard storage write after its failed append",
             ));

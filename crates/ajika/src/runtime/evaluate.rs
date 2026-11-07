@@ -15,7 +15,7 @@ use super::{
     record::{Address, Dependency, Record, RecordHeader, Slot, ValueRecord},
     value::{Codec, Value},
 };
-use crate::{Durability, Input, Lifetime, Persist, Query, Result};
+use crate::{Durability, Error, Input, Lifetime, Persist, Query, Result, UnavailableData};
 
 impl<S: Send + Sync + 'static> Db<'_, S> {
     /// Ask query Q for the answer to `key` under this operation's captured inputs.
@@ -98,15 +98,15 @@ impl<S: Send + Sync + 'static> Db<'_, S> {
             let producer = frame
                 .owner
                 .clone()
-                .ok_or_else(|| crate::Error::contract("outputs require an executing query"))?;
+                .ok_or_else(|| Error::contract("outputs require an executing query"))?;
             let slot = slot.encode()?;
             let value = Value {
                 data: value,
                 codec: Some(Codec::of::<T>()),
             };
             let mut reads = frame.reads.lock().expect("query outputs");
-            if !(reads.outputs.insert(Some(slot.clone()), value).is_none()) {
-                return Err(crate::Error::contract("query emitted an output slot twice"));
+            if reads.outputs.insert(Some(slot.clone()), value).is_some() {
+                return Err(Error::contract("query emitted an output slot twice"));
             }
             Ok(Output::new(producer, slot))
         })
@@ -123,8 +123,8 @@ impl<S: Send + Sync + 'static> Db<'_, S> {
     ) -> Result<Arc<T>> {
         self.handle(|| {
             self.check_cancelled()?;
-            if !(self.frame.owner.as_ref() != Some(address)) {
-                return Err(crate::Error::contract(
+            if self.frame.owner.as_ref() == Some(address) {
+                return Err(Error::contract(
                     "query cannot read its own output while executing",
                 ));
             }
@@ -139,12 +139,13 @@ impl<S: Send + Sync + 'static> Db<'_, S> {
                 return Ok(value);
             }
             let registry = &self.operation.database.registry;
-            let memo = registry.replay(self, address, false)?.ok_or_else(|| {
-                crate::Error::from(crate::UnavailableData::Output {
-                    producer: address.family.clone(),
-                    slot: slot.to_vec(),
-                })
-            })?;
+            let memo =
+                registry
+                    .replay(self, address, false)?
+                    .ok_or_else(|| UnavailableData::Output {
+                        producer: address.family.clone(),
+                        slot: slot.to_vec(),
+                    })?;
             let slot = Some(slot.to_vec());
             let mut value = self.materialize_output::<T>(&memo, &slot)?;
             if value.is_none() {
@@ -153,11 +154,9 @@ impl<S: Send + Sync + 'static> Db<'_, S> {
                 registry.replay(self, address, true)?;
                 value = self.materialize_output::<T>(&memo, &slot)?;
             }
-            let value = value.ok_or_else(|| {
-                crate::Error::from(crate::UnavailableData::Output {
-                    producer: address.family.clone(),
-                    slot: slot.clone().unwrap_or_default(),
-                })
+            let value = value.ok_or_else(|| UnavailableData::Output {
+                producer: address.family.clone(),
+                slot: slot.clone().unwrap_or_default(),
             })?;
             let state = memo.lock();
             let header = state.header.as_ref().expect("output producer is verified");
@@ -193,11 +192,12 @@ impl<S: Send + Sync + 'static> Db<'_, S> {
                 }
                 state.header.clone().expect("output producer is verified")
             };
-            if !(header.values.contains_key(slot)) {
-                return Err(crate::Error::from(crate::UnavailableData::Output {
+            if !header.values.contains_key(slot) {
+                return Err(UnavailableData::Output {
                     producer: memo.address.family.clone(),
                     slot: slot.clone().unwrap_or_default(),
-                }));
+                }
+                .into());
             }
             let Some(value) = self.load(&memo.address, &header, slot, Codec::of::<T>(), false)?
             else {

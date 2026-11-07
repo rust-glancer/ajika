@@ -9,10 +9,11 @@ use std::{
     time::{Duration, Instant},
 };
 
+use ajika_storage::{Compression, EncodedValue, Write};
+
 use crate::{
-    Result,
+    Error, Result,
     runtime::{record::Id, value::Value},
-    storage,
 };
 
 pub(crate) struct PendingValue {
@@ -27,8 +28,8 @@ impl PendingValue {
     /// TODO: stream oversized values so they do not need a complete encoded buffer.
     pub(crate) fn write_all(
         pending: &[Self],
-        write: &mut storage::Write<'_>,
-        compression: storage::Compression,
+        write: &mut Write<'_>,
+        compression: Compression,
         workers: usize,
         check: &dyn Fn() -> Result<()>,
     ) -> Result<u64> {
@@ -55,19 +56,20 @@ impl PendingValue {
             }
             let batch = &pending[offset..end];
             let started = Instant::now();
-            let encode = |values: &[Self]| -> Result<Vec<storage::EncodedValue>> {
+            let encode = |values: &[Self]| -> Result<Vec<EncodedValue>> {
                 values
                     .iter()
                     .map(|value| {
                         let codec = value.value.codec.expect("persistent value codec");
-                        Ok(compression.encode((codec.encode)(&value.value.data, value.length)?)?)
+                        let bytes = (codec.encode)(&value.value.data, value.length)?;
+                        compression.encode(bytes).map_err(Error::from)
                     })
                     .collect()
             };
             let encoded = if workers == 1 || batch.len() == 1 {
                 encode(batch)?
             } else {
-                thread::scope(|scope| -> Result<Vec<storage::EncodedValue>> {
+                thread::scope(|scope| -> Result<Vec<EncodedValue>> {
                     let mut chunks = batch.chunks(batch.len().div_ceil(workers.min(batch.len())));
                     let first = chunks.next().expect("nonempty batch");
                     let handles = chunks

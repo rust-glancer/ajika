@@ -59,12 +59,13 @@ impl Compression {
     /// The stored checksum is checked by the reader before it reaches this function.
     pub(crate) fn decode(self, bytes: Vec<u8>, raw_length: u64) -> Result<Vec<u8>> {
         if self == Self::None {
-            if !(bytes.len() as u64 == raw_length) {
+            if bytes.len() as u64 != raw_length {
                 return Err(Error::invalid_cache("invalid raw value length"));
             }
             return Ok(bytes);
         }
-        let mut result = Vec::with_capacity(usize::try_from(raw_length)?);
+        let mut result =
+            Vec::with_capacity(usize::try_from(raw_length).map_err(Error::invalid_source)?);
         let limit = raw_length
             .checked_add(1)
             .ok_or_else(|| Error::invalid_cache("invalid value length"))?;
@@ -84,7 +85,7 @@ impl Compression {
                     .map_err(Error::invalid_source)?;
             }
         }
-        if !(result.len() as u64 == raw_length) {
+        if result.len() as u64 != raw_length {
             return Err(Error::invalid_cache("invalid decoded value length"));
         }
         Ok(result)

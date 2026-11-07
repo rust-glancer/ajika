@@ -20,7 +20,7 @@ use std::{
 };
 
 use self::table::{ErasedTable, Table, Value};
-use crate::{Durability, Lifetime, Persist, Result, Stamp};
+use crate::{Durability, Error, Lifetime, Persist, Result, Stamp, UnavailableData};
 
 /// One field of a keyed input declaration. Prefer [`#[ajika::input]`](macro@crate::input), which
 /// generates this contract and typed getters/setters for each field of an ordinary struct.
@@ -39,7 +39,7 @@ pub trait Input: 'static {
     /// Concurrent acquisitions may race; all readers receive the first value installed in the
     /// snapshot. No runtime lock is held while this function performs I/O.
     fn initialize(_key: &Self::Key) -> Result<Self::Value> {
-        Err(crate::UnavailableData::Input { name: Self::NAME }.into())
+        Err(UnavailableData::Input { name: Self::NAME }.into())
     }
 
     fn durability(_value: &Self::Value) -> Durability {
@@ -206,8 +206,8 @@ impl Inputs {
                     Some(value) => {
                         let (new_key, new_value) = relocate(key, &value.value);
                         let new_value = Value::<T>::new(new_value)?;
-                        if !(new_key == *key && new_value.record == value.record) {
-                            return Err(crate::Error::contract(format!(
+                        if new_key != *key || new_value.record != value.record {
+                            return Err(Error::contract(format!(
                                 "relocation changed input {}",
                                 T::NAME
                             )));

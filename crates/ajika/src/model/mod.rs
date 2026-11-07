@@ -186,7 +186,7 @@ pub trait Query: 'static {
     /// there is no reusable answer, or when a transient value must be reconstructed.
     /// Given equal observations, this must produce an equal answer. Do not rely on side effects:
     /// a stored or resident answer skips execution entirely.
-    fn execute(db: &Db<'_, Self::Services>, key: Self::Key) -> crate::Result<Arc<Self::Value>>;
+    fn execute(db: &Db<'_, Self::Services>, key: Self::Key) -> Result<Arc<Self::Value>>;
     /// Choose whether the return value can be kept by the backend between operations.
     /// This controls the payload; Ajika can still remember dependencies for a transient value.
     fn storage() -> Storage<Self::Value>;

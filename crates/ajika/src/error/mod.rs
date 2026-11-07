@@ -2,7 +2,9 @@
 
 use std::{error::Error as StdError, fmt, io, path::Path, sync::Arc};
 
-use crate::{QueryCycle, storage};
+use ajika_storage::Error as StorageError;
+
+use crate::{PersistenceErrorKind, QueryCycle};
 
 pub type Result<T> = std::result::Result<T, Error>;
 
@@ -38,12 +40,10 @@ pub enum UnavailableData {
     Identity { namespace: &'static str, id: u32 },
 }
 
-pub use storage::ErrorKind as PersistenceKind;
-
 #[derive(Debug, thiserror::Error)]
 enum PersistenceRepr {
     #[error(transparent)]
-    Storage(storage::Error),
+    Storage(StorageError),
     #[error("invalid cached query: {message}")]
     InvalidCache {
         message: String,
@@ -60,11 +60,11 @@ enum PersistenceRepr {
 pub struct PersistenceError(PersistenceRepr);
 
 impl PersistenceError {
-    pub fn kind(&self) -> PersistenceKind {
+    pub fn kind(&self) -> PersistenceErrorKind {
         match &self.0 {
             PersistenceRepr::Storage(error) => error.kind(),
-            PersistenceRepr::InvalidCache { .. } => PersistenceKind::InvalidCache,
-            PersistenceRepr::Unavailable(_) => PersistenceKind::Unavailable,
+            PersistenceRepr::InvalidCache { .. } => PersistenceErrorKind::InvalidCache,
+            PersistenceRepr::Unavailable(_) => PersistenceErrorKind::Unavailable,
         }
     }
 
@@ -217,7 +217,7 @@ impl Error {
     }
 
     pub(crate) fn is_capacity(&self) -> bool {
-        matches!(self.kind(), ErrorKind::Persistence(error) if error.kind() == PersistenceKind::Capacity)
+        matches!(self.kind(), ErrorKind::Persistence(error) if error.kind() == PersistenceErrorKind::Capacity)
     }
 
     pub(crate) fn invalid_cache(message: impl Into<String>) -> Self {
@@ -266,8 +266,8 @@ impl StdError for Error {
     }
 }
 
-impl From<storage::Error> for Error {
-    fn from(source: storage::Error) -> Self {
+impl From<StorageError> for Error {
+    fn from(source: StorageError) -> Self {
         Self::from(PersistenceError(PersistenceRepr::Storage(source)))
     }
 }
@@ -309,11 +309,11 @@ impl From<getrandom::Error> for Error {
 }
 
 /// Diagnostic context preserves the error's category and cancellation checkpoint.
-pub trait ResultExt<T>: Sized {
+pub trait ResultExt: Sized {
     fn context(self, message: impl Into<String>) -> Self;
 }
 
-impl<T> ResultExt<T> for Result<T> {
+impl<T> ResultExt for Result<T> {
     fn context(self, message: impl Into<String>) -> Self {
         self.map_err(|error| error.context(message))
     }
@@ -357,7 +357,7 @@ mod tests {
             "recovery status describes the failed operation"
         );
         assert!(
-            matches!(error.kind(), super::ErrorKind::Persistence(error) if error.kind() == super::PersistenceKind::Io)
+            matches!(error.kind(), super::ErrorKind::Persistence(error) if error.kind() == super::PersistenceErrorKind::Io)
         );
     }
 }

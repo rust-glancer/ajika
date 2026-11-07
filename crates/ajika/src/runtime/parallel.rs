@@ -14,7 +14,7 @@ use std::{
 };
 
 use super::{Db, coordination::Coordination, frame::Frame};
-use crate::Result;
+use crate::{Error, Result};
 
 /// One extra thread taken from the operation's shared worker budget. Returning it on drop lets
 /// later nested batches use that capacity, including when the worker exits by unwinding.
@@ -36,7 +36,7 @@ impl Drop for Worker<'_> {
             // A callback can panic between query calls, with no claim guard on its
             // stack. Signal other workers before the thread scope starts joining them.
             self.0
-                .fail(crate::Error::invariant("parallel query callback panicked"));
+                .fail(Error::invariant("parallel query callback panicked"));
         }
     }
 }

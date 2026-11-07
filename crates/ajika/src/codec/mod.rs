@@ -58,14 +58,14 @@ pub(crate) fn encode_into<T: Persist>(writer: impl wincode::io::Writer, value: &
 
 #[cfg(test)]
 mod tests {
-    use crate::{ErrorKind, PersistenceKind};
+    use crate::{ErrorKind, PersistenceErrorKind};
 
     #[test]
     fn internal_decoding_retains_the_cache_category_and_original_cause() {
         for result in [super::decode::<u64>(&[]), super::decode_prefix::<u64>(&[])] {
             let error = result.expect_err("an integer requires encoded bytes");
             assert!(
-                matches!(error.kind(), ErrorKind::Persistence(error) if error.kind() == PersistenceKind::InvalidCache)
+                matches!(error.kind(), ErrorKind::Persistence(error) if error.kind() == PersistenceErrorKind::InvalidCache)
             );
             assert!(
                 std::error::Error::source(&error)

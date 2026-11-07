@@ -5,9 +5,9 @@
 //! anything in the caller's dependency records.
 
 use redb::TableDefinition;
-use wincode::{SchemaRead, SchemaWrite};
+use wincode::{SchemaRead, SchemaReadOwned, SchemaWrite, config::DefaultConfig};
 
-use crate::{Compression, Id};
+use crate::{Compression, Error, Id, Result};
 
 pub(crate) const FORMAT: &str = "ajika-packs-2";
 pub(crate) const HEADER: TableDefinition<&str, &[u8]> = TableDefinition::new("header");
@@ -79,7 +79,16 @@ impl FrameHeader {
     }
 }
 
-pub(crate) fn new_id() -> crate::Result<PackId> {
+pub(crate) fn encode<T: SchemaWrite<DefaultConfig, Src = T>>(value: &T) -> Result<Vec<u8>> {
+    wincode::serialize(value).map_err(Error::unexpected)
+}
+
+/// An index entry or frame header must decode completely to belong to this storage format.
+pub(crate) fn decode<T: SchemaReadOwned<DefaultConfig, Dst = T>>(bytes: &[u8]) -> Result<T> {
+    wincode::deserialize_exact(bytes).map_err(Error::invalid_source)
+}
+
+pub(crate) fn new_id() -> Result<PackId> {
     let mut id = [0; 16];
     getrandom::fill(&mut id)?;
     Ok(id)

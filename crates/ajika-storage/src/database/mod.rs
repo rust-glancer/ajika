@@ -6,6 +6,7 @@
 
 use std::{
     collections::HashSet,
+    error::Error as _,
     fs::{self, File, OpenOptions},
     path::{Path, PathBuf},
     sync::{
@@ -17,7 +18,7 @@ use std::{
 use redb::{ReadableDatabase, ReadableTable};
 
 use crate::{
-    Compression, Error, Read, Result, Statistics, Write,
+    Compression, Error, ErrorKind, Read, Result, Statistics, Write,
     format::{self, HEADER, IDENTITIES, PACKS, PackHeader, PackId, PackInfo, RECORDS, VALUES},
     pack::PackWriter,
 };
@@ -65,58 +66,66 @@ impl Database {
     /// Open an instance, resetting incompatible or unreadable contents while still owning its
     /// directory lock. Format changes discard derivable data; no schema migration is attempted.
     pub fn open(path: &Path, epoch: &str, options: Options) -> Result<Self> {
-        (|| {
-        fs::create_dir_all(path)?;
-        let owner = OpenOptions::new()
-            .create(true)
-            .truncate(false)
-            .read(true)
-            .write(true)
-            .open(path.join("owner.lock"))?;
-        owner.try_lock().map_err(|error| match error {
-            fs::TryLockError::WouldBlock => Error::in_use(),
-            fs::TryLockError::Error(error) => error.into(),
-        })?;
-        let packs = path.join("packs");
-        fs::create_dir_all(&packs)?;
-        let opened = Self::open_contents(path, epoch);
-        let (index, instance) = match opened {
-            Ok(contents) => contents,
-            Err(error) if error.kind() == crate::ErrorKind::InUse => {
-                return Err(error);
-            }
-            Err(error) => {
-                tracing::warn!(%error, path = %path.display(), "discarding unreadable packed storage");
-                // The failed open has released all redb handles. Keep owner.lock in place so
-                // another opener cannot acquire a new lock inode while this reset is running.
-                let index = path.join("index.redb");
-                if index.exists() {
-                    fs::remove_file(index)?;
+        let result = (|| -> Result<Self> {
+            fs::create_dir_all(path)?;
+            let owner = OpenOptions::new()
+                .create(true)
+                .truncate(false)
+                .read(true)
+                .write(true)
+                .open(path.join("owner.lock"))?;
+            owner.try_lock().map_err(|error| match error {
+                fs::TryLockError::WouldBlock => Error::in_use(),
+                fs::TryLockError::Error(error) => error.into(),
+            })?;
+            let packs = path.join("packs");
+            fs::create_dir_all(&packs)?;
+            let (index, instance) = match Self::open_contents(path, epoch) {
+                Ok(contents) => contents,
+                Err(error) if error.kind() == ErrorKind::InUse => return Err(error),
+                Err(error) => {
+                    tracing::warn!(
+                        %error,
+                        cause = error.source().map(tracing::field::display),
+                        path = %path.display(),
+                        "discarding unreadable packed storage"
+                    );
+                    // TODO: Implement more sophisticated recovery paths.
+                    // The failed open has released all redb handles. Keep owner.lock in place so
+                    // another opener cannot acquire a new lock inode while this reset is running.
+                    let index = path.join("index.redb");
+                    if index.exists() {
+                        fs::remove_file(index)?;
+                    }
+                    fs::remove_dir_all(&packs)?;
+                    fs::create_dir_all(&packs)?;
+                    Self::open_contents(path, epoch)?
                 }
-                fs::remove_dir_all(&packs)?;
-                fs::create_dir_all(&packs)?;
-                Self::open_contents(path, epoch)?
+            };
+            let database = Self {
+                index,
+                root: path.to_owned(),
+                packs,
+                instance,
+                access: RwLock::new(()),
+                healthy: AtomicBool::new(true),
+                physical_bytes: AtomicU64::new(0),
+                maintenance_due: AtomicBool::new(true),
+                options,
+                files: Mutex::default(),
+                _owner: owner,
+            };
+            if let Err(error) = database.clean_orphans() {
+                tracing::warn!(
+                    %error,
+                    cause = error.source().map(tracing::field::display),
+                    "pack cleanup deferred"
+                );
             }
-        };
-        let database = Self {
-            index,
-            root: path.to_owned(),
-            packs,
-            instance,
-            access: RwLock::new(()),
-            healthy: AtomicBool::new(true),
-            physical_bytes: AtomicU64::new(0),
-            maintenance_due: AtomicBool::new(true),
-            options,
-            files: Mutex::default(),
-            _owner: owner,
-        };
-        if let Err(error) = database.clean_orphans() {
-            tracing::warn!(%error, "pack cleanup deferred");
-        }
-        database.refresh_physical_bytes()?;
-        Ok(database)
-        })().map_err(|error: Error| error.at(path))
+            database.refresh_physical_bytes()?;
+            Ok(database)
+        })();
+        result.map_err(|error| error.at(path))
     }
 
     fn open_contents(path: &Path, epoch: &str) -> Result<(redb::Database, PackId)> {
@@ -140,7 +149,8 @@ impl Database {
                     .get("instance")?
                     .ok_or_else(|| Error::invalid_cache("missing storage instance"))?
                     .value()
-                    .try_into()?
+                    .try_into()
+                    .map_err(Error::invalid_source)?
             };
             (reset, instance)
         };
@@ -161,28 +171,27 @@ impl Database {
         let read = index.begin_read()?;
         for entry in read.open_table(PACKS)?.iter()? {
             let (id, bytes) = entry?;
-            let info: PackInfo = wincode::deserialize_exact(bytes.value())?;
-            if !(info.length >= PackHeader::LENGTH
-                && info.live_bytes <= info.length - PackHeader::LENGTH
-                && info.live_values > 0
-                && (PackHeader::LENGTH..info.length).contains(&info.scan_offset))
+            let info: PackInfo = format::decode(bytes.value())?;
+            if info.length < PackHeader::LENGTH
+                || info.live_bytes > info.length - PackHeader::LENGTH
+                || info.live_values == 0
+                || !(PackHeader::LENGTH..info.length).contains(&info.scan_offset)
             {
                 return Err(Error::invalid_cache("invalid pack inventory"));
             }
             let mut file = File::open(PackWriter::path(&path.join("packs"), id.value()))?;
-            if !(file.metadata()?.len() == info.length) {
+            if file.metadata()?.len() != info.length {
                 return Err(Error::invalid_cache("invalid pack file length"));
             }
             let mut bytes = [0; PackHeader::LENGTH as usize];
             std::io::Read::read_exact(&mut file, &mut bytes)?;
-            let header: PackHeader = wincode::deserialize_exact(&bytes)?;
-            if !(header
-                == PackHeader {
-                    magic: PackHeader::MAGIC,
-                    instance,
-                    pack: *id.value(),
-                })
-            {
+            let header: PackHeader = format::decode(&bytes)?;
+            let expected_header = PackHeader {
+                magic: PackHeader::MAGIC,
+                instance,
+                pack: *id.value(),
+            };
+            if header != expected_header {
                 return Err(Error::invalid_cache("invalid pack identity"));
             }
         }
@@ -211,7 +220,7 @@ impl Database {
     }
 
     pub(crate) fn check(&self) -> Result<()> {
-        if !(self.healthy.load(Ordering::Acquire)) {
+        if !self.healthy.load(Ordering::Acquire) {
             return Err(
                 Error::unavailable("reopen storage after its failed commit").require_reopen()
             );

@@ -18,7 +18,7 @@ use redb::ReadableTable;
 
 use crate::{
     Database, Error, Result, Write,
-    format::{FrameHeader, Location, PACKS, PackHeader, PackInfo, VALUES},
+    format::{self, FrameHeader, Location, PACKS, PackHeader, PackInfo, VALUES},
     pack::PackWriter,
 };
 
@@ -47,10 +47,7 @@ impl Database {
             .iter()?
             .map(|row| {
                 let (id, bytes) = row?;
-                Ok((
-                    *id.value(),
-                    wincode::deserialize_exact::<PackInfo>(bytes.value())?,
-                ))
+                Ok((*id.value(), format::decode::<PackInfo>(bytes.value())?))
             })
             .collect::<Result<Vec<_>>>()?;
 
@@ -122,19 +119,19 @@ impl Database {
             while offset < info.length && scanned < PASS_BYTES && frames < PASS_FRAMES {
                 let mut bytes = [0; FrameHeader::LENGTH as usize];
                 source.read_exact(&mut bytes)?;
-                let header: FrameHeader = wincode::deserialize_exact(&bytes)?;
+                let header: FrameHeader = format::decode(&bytes)?;
                 let end = offset
                     .checked_add(FrameHeader::LENGTH)
                     .and_then(|start| start.checked_add(header.stored_length))
                     .ok_or_else(|| Error::invalid_cache("invalid pack frame range"))?;
-                if !(end <= info.length) {
+                if end > info.length {
                     return Err(Error::invalid_cache("invalid pack frame range"));
                 }
                 let live = {
                     let table = write.transaction.open_table(VALUES)?;
                     let location = table
                         .get(&header.id)?
-                        .map(|bytes| wincode::deserialize_exact::<Location>(bytes.value()))
+                        .map(|bytes| format::decode::<Location>(bytes.value()))
                         .transpose()?;
                     match location {
                         Some(Location::Pack {
@@ -142,7 +139,7 @@ impl Database {
                             offset: at,
                             header: expected,
                         }) if pack == id && at == offset => {
-                            if !(header == expected) {
+                            if header != expected {
                                 return Err(Error::invalid_cache("invalid stored frame header"));
                             }
                             true
@@ -168,7 +165,7 @@ impl Database {
             remaining.scan_offset = offset;
             // A damaged dead-frame length could skip a live frame. Never retire such a file:
             // its inventory must agree that all live locations have actually moved.
-            if !(offset < info.length || remaining.live_values == 0) {
+            if offset >= info.length && remaining.live_values != 0 {
                 return Err(Error::invalid_cache(
                     "pack inventory contains unreachable frames",
                 ));

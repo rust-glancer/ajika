@@ -6,6 +6,7 @@
 
 use std::{
     collections::BTreeMap,
+    error::Error as _,
     fs::File,
     io,
     sync::{Arc, RwLockReadGuard, RwLockWriteGuard, atomic::Ordering},
@@ -17,7 +18,8 @@ use redb::{ReadableDatabase, ReadableTable};
 use crate::{
     Database, EncodedValue, Error, Id, Result,
     format::{
-        FrameHeader, IDENTITIES, Location, PACKS, PackHeader, PackId, PackInfo, RECORDS, VALUES,
+        self, FrameHeader, IDENTITIES, Location, PACKS, PackHeader, PackId, PackInfo, RECORDS,
+        VALUES,
     },
     pack::PackWriter,
     value::INLINE_BYTES,
@@ -99,10 +101,10 @@ impl<'a> Write<'a> {
         }
         let previous = {
             let mut table = self.transaction.open_table(VALUES)?;
-            let bytes = wincode::serialize(&location)?;
+            let bytes = format::encode(&location)?;
             table
                 .insert(id, bytes.as_slice())?
-                .map(|previous| wincode::deserialize_exact::<Location>(previous.value()))
+                .map(|previous| format::decode::<Location>(previous.value()))
                 .transpose()?
         };
         if let Some(previous) = previous {
@@ -126,7 +128,7 @@ impl<'a> Write<'a> {
             let mut table = self.transaction.open_table(VALUES)?;
             table
                 .remove(id)?
-                .map(|previous| wincode::deserialize_exact::<Location>(previous.value()))
+                .map(|previous| format::decode::<Location>(previous.value()))
                 .transpose()?
         };
         if let Some(previous) = previous {
@@ -146,7 +148,7 @@ impl<'a> Write<'a> {
                 let bytes = table
                     .get(&pack)?
                     .ok_or_else(|| Error::invalid_cache("missing pack inventory"))?;
-                entry.insert(wincode::deserialize_exact(bytes.value())?);
+                entry.insert(format::decode(bytes.value())?);
             }
             let info = self
                 .changed_packs
@@ -189,7 +191,7 @@ impl<'a> Write<'a> {
                 if info.live_values == 0 {
                     table.remove(id)?;
                 } else {
-                    table.insert(id, wincode::serialize(info)?.as_slice())?;
+                    table.insert(id, format::encode(info)?.as_slice())?;
                 }
             }
         }
@@ -206,14 +208,22 @@ impl<'a> Write<'a> {
         // No reader or cached handle may keep an obsolete file open when it is unlinked.
         self.database.files.lock().expect("pack handles").clear();
         if let Err(error) = self.database.clean_orphans() {
-            tracing::warn!(%error, "pack cleanup deferred until reopen");
+            tracing::warn!(
+                %error,
+                cause = error.source().map(tracing::field::display),
+                "pack cleanup deferred until reopen"
+            );
         }
         if let Err(error) = self.database.refresh_physical_bytes() {
             // If accounting is unavailable, stop accepting writes rather than bypass the limit.
             self.database
                 .physical_bytes
                 .store(u64::MAX, Ordering::Relaxed);
-            tracing::warn!(%error, "could not measure packed cache size");
+            tracing::warn!(
+                %error,
+                cause = error.source().map(tracing::field::display),
+                "could not measure packed cache size"
+            );
         }
         tracing::debug!(
             ?sync_time,
@@ -282,11 +292,11 @@ impl<'a> Read<'a> {
             let value = table
                 .get(id)?
                 .ok_or_else(|| Error::invalid_cache("missing stored value"))?;
-            wincode::deserialize_exact(value.value())?
+            format::decode(value.value())?
         };
         match location {
             Location::Inline(bytes) => {
-                if !(bytes.len() as u64 == length) {
+                if bytes.len() as u64 != length {
                     return Err(Error::invalid_cache("invalid inline value length"));
                 }
                 Ok(bytes)
@@ -296,11 +306,11 @@ impl<'a> Read<'a> {
                 offset,
                 header,
             } => {
-                if !(&header.id == id && header.raw_length == length) {
+                if &header.id != id || header.raw_length != length {
                     return Err(Error::invalid_cache("invalid value identity or length"));
                 }
                 let table = self.transaction.open_table(PACKS)?;
-                let info: PackInfo = wincode::deserialize_exact(
+                let info: PackInfo = format::decode(
                     table
                         .get(&pack)?
                         .ok_or_else(|| Error::invalid_cache("missing pack inventory"))?
@@ -309,7 +319,7 @@ impl<'a> Read<'a> {
                 let end = offset
                     .checked_add(header.frame_length())
                     .ok_or_else(|| Error::invalid_cache("invalid pack range"))?;
-                if !(offset >= PackHeader::LENGTH && end <= info.length) {
+                if offset < PackHeader::LENGTH || end > info.length {
                     return Err(Error::invalid_cache("invalid pack range"));
                 }
                 let file = {
@@ -335,15 +345,17 @@ impl<'a> Read<'a> {
                 };
                 let mut framing = [0; FrameHeader::LENGTH as usize];
                 Self::read_exact_at(&file, &mut framing, offset)?;
-                let frame: FrameHeader = wincode::deserialize_exact(&framing)?;
-                if !(frame == header) {
+                let frame: FrameHeader = format::decode(&framing)?;
+                if frame != header {
                     return Err(Error::invalid_cache("invalid stored frame header"));
                 }
                 // Read the payload into its own allocation, avoiding a full-value memmove to
                 // remove a framing prefix before returning an uncompressed value.
-                let mut bytes = vec![0; usize::try_from(header.stored_length)?];
+                let stored_length =
+                    usize::try_from(header.stored_length).map_err(Error::invalid_source)?;
+                let mut bytes = vec![0; stored_length];
                 Self::read_exact_at(&file, &mut bytes, offset + FrameHeader::LENGTH)?;
-                if !(blake3::hash(&bytes).as_bytes() == &header.checksum) {
+                if blake3::hash(&bytes).as_bytes() != &header.checksum {
                     return Err(Error::invalid_cache("invalid stored value checksum"));
                 }
                 header.compression.decode(bytes, length)

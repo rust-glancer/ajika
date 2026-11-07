@@ -233,15 +233,15 @@ fn forwarded_syntax(db: &Db) -> SharedResult<Syntax> {
 }
 
 #[test]
-fn forwarding_reuses_input_and_non_cloneable_query_values() -> Result<()> {
+fn forwarding_reuses_input_and_non_cloneable_query_values() -> ajika::Result<()> {
     let mut db = Database::memory(inputs("hello"), (), retention());
-    Ok(db.run(|db| {
+    db.run(|db| {
         let text = Settings::at(()).text(db)?;
         assert!(Arc::ptr_eq(&text, &forwarded_text(db)?));
         let syntax = parse(db)?;
         assert!(Arc::ptr_eq(&syntax, &forwarded_syntax(db)?));
         Ok(())
-    })?)
+    })
 }
 
 #[ajika::query]

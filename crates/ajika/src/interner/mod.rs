@@ -11,7 +11,9 @@ use std::{
     time::Instant,
 };
 
-use crate::{Persist, Result, codec, storage};
+use ajika_storage::Write;
+
+use crate::{Error, Persist, Result, UnavailableData, codec};
 
 /// A database's shared interner for immutable objects.
 ///
@@ -121,8 +123,8 @@ impl Interner {
     pub(crate) fn load(rows: Vec<(String, u32, Vec<u8>)>) -> Result<Self> {
         let interner = Self::default();
         for (namespace, expected, key) in rows {
-            if !(interner.intern(namespace, &key)? == expected) {
-                return Err(crate::Error::invalid_cache("invalid identity sequence"));
+            if interner.intern(namespace, &key)? != expected {
+                return Err(Error::invalid_cache("invalid identity sequence"));
             }
         }
         for entries in interner
@@ -139,7 +141,7 @@ impl Interner {
 
     /// Write pending assignments while the operation is drained. A failed commit leaves saved
     /// lengths untouched; the next successful checkpoint can write the same assignments again.
-    pub(crate) fn write_pending(&self, write: &storage::Write) -> Result<Vec<(String, usize)>> {
+    pub(crate) fn write_pending(&self, write: &Write<'_>) -> Result<Vec<(String, usize)>> {
         let state = self.state.lock().expect("interner state");
         let mut saved = Vec::new();
         for (name, entries) in &state.namespaces {
@@ -187,12 +189,10 @@ pub trait Interned: Copy {
 
     fn fields(self, interner: &Interner) -> Result<Self::Fields> {
         let namespace = Self::NAMESPACE;
-        let key = interner.key(namespace, self.as_raw()).ok_or_else(|| {
-            crate::Error::from(crate::UnavailableData::Identity {
-                namespace,
-                id: self.as_raw(),
-            })
-        })?;
+        let id = self.as_raw();
+        let key = interner
+            .key(namespace, id)
+            .ok_or(UnavailableData::Identity { namespace, id })?;
         codec::decode(&key)
     }
 }

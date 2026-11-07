@@ -85,7 +85,7 @@ impl<T: Persist + PartialEq + Send + Sync + 'static> Output<T> {
     /// Inside a query, the read records this output's version so the caller can be reused while
     /// this particular answer stays equal. It does not depend on sibling outputs. If the producer
     /// no longer emits this slot, the handle cannot supply a value and the read returns an error.
-    pub fn value<S: Send + Sync + 'static>(&self, db: &Db<'_, S>) -> crate::Result<Arc<T>> {
+    pub fn value<S: Send + Sync + 'static>(&self, db: &Db<'_, S>) -> Result<Arc<T>> {
         db.output_value(&self.identity.producer, &self.identity.slot)
     }
 }

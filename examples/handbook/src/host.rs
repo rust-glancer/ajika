@@ -165,7 +165,7 @@ impl Host {
             return Ok(*id);
         }
         if self.draft.as_ref().is_some_and(|d| d.path == path) {
-            return Ok(DocumentId::new(&self.database.interner(), path.to_owned())?);
+            return DocumentId::new(&self.database.interner(), path.to_owned()).map_err(Into::into);
         }
         anyhow::bail!("unknown document: {path}")
     }
@@ -202,12 +202,16 @@ impl Host {
         Ok(())
     }
 
-    fn view(saved: &Inputs, draft: Option<&Draft>, interner: &ajika::Interner) -> Result<Inputs> {
+    fn view(
+        saved: &Inputs,
+        draft: Option<&Draft>,
+        interner: &ajika::Interner,
+    ) -> ajika::Result<Inputs> {
         let Some(draft) = draft else {
             return Ok(saved.clone());
         };
         let id = DocumentId::new(interner, draft.path.clone())?;
-        Ok(saved.overlay().edit(|update| {
+        saved.overlay().edit(|update| {
             Document::at(id).set_source(
                 update,
                 Source {
@@ -215,7 +219,7 @@ impl Host {
                     lifetime: Lifetime::Session,
                 },
             )
-        })?)
+        })
     }
 
     pub(crate) fn save(&mut self) -> Result<()> {
