@@ -23,11 +23,8 @@ use crate::{
 };
 
 pub(crate) const PASS_BYTES: u64 = 16 * 1024 * 1024;
-
 const PASS_FRAMES: u64 = 4096;
-
 const SMALL_PACK_BYTES: u64 = PASS_BYTES / 4;
-
 const SMALL_PACK_COUNT: usize = 8;
 
 impl Database {

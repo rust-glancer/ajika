@@ -187,7 +187,6 @@ pub trait Query: 'static {
     /// Given equal observations, this must produce an equal answer. Do not rely on side effects:
     /// a stored or resident answer skips execution entirely.
     fn execute(db: &Db<'_, Self::Services>, key: Self::Key) -> crate::Result<Arc<Self::Value>>;
-
     /// Choose whether the return value can be kept by the backend between operations.
     /// This controls the payload; Ajika can still remember dependencies for a transient value.
     fn storage() -> Storage<Self::Value>;

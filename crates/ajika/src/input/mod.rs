@@ -30,9 +30,7 @@ use crate::{Durability, Lifetime, Persist, Result, Stamp};
 /// must cover everything queries can observe; mutable residency bookkeeping is not logical data.
 pub trait Input: 'static {
     type Key: Persist + Clone + Eq + Hash + Send + Sync + 'static;
-
     type Value: Clone + Send + Sync + 'static;
-
     const NAME: &'static str;
 
     fn stamp(value: &Self::Value) -> Result<Stamp>;

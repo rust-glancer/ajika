@@ -8,7 +8,6 @@ use std::{
 };
 
 pub type Result<T> = std::result::Result<T, Error>;
-
 type BoxError = Box<dyn StdError + Send + Sync>;
 
 /// The decisions a storage caller can make without inspecting dependency-specific errors.

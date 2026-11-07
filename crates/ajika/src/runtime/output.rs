@@ -139,7 +139,6 @@ unsafe impl<T, C: wincode::config::Config> SchemaWrite<C> for Output<T> {
 // No T is decoded here; T is only needed when value() later asks storage for the payload.
 unsafe impl<'de, T, C: wincode::config::Config> SchemaRead<'de, C> for Output<T> {
     type Dst = Self;
-
     const TYPE_META: wincode::TypeMeta = wincode::TypeMeta::Dynamic;
 
     fn read(

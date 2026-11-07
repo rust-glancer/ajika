@@ -199,11 +199,8 @@ struct Unregistered;
 
 impl ajika::Query for Unregistered {
     type Services = ();
-
     type Key = ();
-
     type Value = u32;
-
     const NAME: &'static str = "unregistered";
 
     fn execute(_: &Db, _: ()) -> ajika::Result<Arc<u32>> {

@@ -33,8 +33,8 @@ impl PendingValue {
         check: &dyn Fn() -> Result<()>,
     ) -> Result<u64> {
         const BATCH_BYTES: u64 = 16 * 1024 * 1024;
-
         const BATCH_VALUES: usize = 4096;
+
         let mut offset = 0;
         let mut bytes_written = 0;
         let mut encoding = Duration::ZERO;

@@ -89,11 +89,8 @@ impl Provider {
             #(#attributes)*
             impl #runtime::Query for #marker {
                 type Services = #services;
-
                 type Key = #key;
-
                 type Value = #value;
-
                 const NAME: &'static str = #identity;
 
                 fn storage() -> #runtime::Storage<Self::Value> { #storage }

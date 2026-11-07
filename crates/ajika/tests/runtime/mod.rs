@@ -38,9 +38,7 @@ impl Sources {
 }
 
 type Db<'a> = ajika::Db<'a, ()>;
-
 type AliasedResult<T> = ajika::Result<T>;
-
 type SharedResult<T> = ajika::Result<Arc<T>>;
 
 fn inputs(text: &str) -> Inputs {

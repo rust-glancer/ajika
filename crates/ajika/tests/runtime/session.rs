@@ -34,7 +34,6 @@ impl Source {
 }
 
 type Db<'a> = ajika::Db<'a, ()>;
-
 type Outputs = (Output<String>, Output<String>, Output<Vec<u8>>);
 
 #[ajika::query]

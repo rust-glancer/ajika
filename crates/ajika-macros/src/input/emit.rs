@@ -136,9 +136,7 @@ impl Field {
             #(#declaration_attributes)* #(#helpers)*
             impl #runtime::Input for #marker {
                 type Key = #key;
-
                 type Value = #value;
-
                 const NAME: &'static str = concat!(#identity, "::", stringify!(#name));
 
                 fn stamp(value: &Self::Value) -> #runtime::Result<#runtime::Stamp> { #stamp }

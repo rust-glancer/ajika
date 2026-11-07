@@ -172,7 +172,6 @@ impl Interner {
 /// it neither retains a decoded copy nor records a query dependency.
 pub trait Interned: Copy {
     type Fields: Persist;
-
     const NAMESPACE: &'static str;
 
     fn from_raw(raw: u32) -> Self;

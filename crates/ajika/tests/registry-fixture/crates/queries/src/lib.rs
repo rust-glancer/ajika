@@ -15,7 +15,6 @@ pub struct File {
 }
 
 type Db<'a> = ajika::Db<'a, ()>;
-
 type ProviderResult<T> = ajika::Result<T>;
 
 // This crate has no direct wincode dependency. Derives must use the runtime's re-export,
