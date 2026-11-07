@@ -108,6 +108,7 @@ fn truncate_only_pack(root: &std::path::Path) -> Result<()> {
         .next()
         .expect("one packed value")?
         .path();
+    // Keep the pack header and remove the frames so a live read encounters the damage.
     std::fs::OpenOptions::new()
         .write(true)
         .open(pack)?
@@ -145,7 +146,7 @@ fn cache_recovery_keeps_identity_assignments() -> Result<()> {
             assert!(db.recovery_pending());
             #[cfg(unix)]
             {
-                // The old handle stays open on the detached inode during live repair.
+                // Replace the file a restart will open while redb still holds the old one.
                 let index = root.path().join("index.redb");
                 std::fs::rename(&index, root.path().join("previous.redb"))?;
                 std::fs::File::create(index)?;

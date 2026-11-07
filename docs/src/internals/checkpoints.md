@@ -83,10 +83,10 @@ on a replacement that existed only in the failed operation's working memos.
 The working memos leave with the operation on both success and failure.
 Retained host `Arc` values are outside that cleanup.
 
-An aborted write leaves the previous checkpoint intact. An uncertain commit
-requires reloading the backing index before serving another operation. Recovery
-runs at the next operation boundary, where Ajika can reconcile saved identities
-with the live interner and rebuild retention bookkeeping.
+An aborted write leaves the previous checkpoint intact. After an uncertain
+commit, either checkpoint could be visible. Ajika resolves it before invoking
+the next uncancelled run's callback. See [storage recovery](storage.md#rebuildable-with-explicit-boundaries)
+for how it decides what to keep.
 
 ## Cache commit and host acceptance differ
 

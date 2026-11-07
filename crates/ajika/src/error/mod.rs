@@ -151,8 +151,8 @@ enum ErrorRepr {
 
 /// Why an Ajika operation stopped. Workers can share the same error so the caller gets its
 /// original cause even when another worker was the first to see it.
-/// Use [`Error::is_cancelled`] at the request boundary and [`Error::kind`] when a particular
-/// failure needs recovery.
+/// Use [`Error::is_cancelled`] at the request boundary and [`Error::kind`] to inspect the cause.
+/// Check [`Database::recovery_pending`](crate::Database::recovery_pending) for pending cache repair.
 #[derive(Clone, Debug)]
 pub struct Error {
     inner: Arc<ErrorRepr>,

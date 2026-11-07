@@ -170,6 +170,7 @@ impl Error {
         // Errors are shared only after publication to callers; constructing filesystem context
         // does not clone an underlying OS error or discard its raw error code.
         let details = Arc::get_mut(&mut self.inner).expect("unshared error context");
+        // A pack read can name the affected file even when its caller only knows the cache path.
         if details.path.is_none() {
             details.path = Some(path.into());
         }
@@ -218,7 +219,8 @@ impl From<io::Error> for Error {
 impl From<redb::DatabaseError> for Error {
     fn from(source: redb::DatabaseError) -> Self {
         match source {
-            // redb reports bad magic and empty existing indexes as InvalidData during open.
+            // redb reports an empty index or a bad file signature as InvalidData during open.
+            // In either case recovery can rebuild the index from caller-supplied assignments.
             redb::DatabaseError::Storage(redb::StorageError::Io(source))
                 if source.kind() == io::ErrorKind::InvalidData =>
             {
@@ -235,7 +237,7 @@ impl From<redb::Error> for Error {
         // than exposing a different public variant for every index API.
         match source {
             redb::Error::DatabaseAlreadyOpen => Self::in_use(),
-            // Unlike a pack I/O failure, an index I/O error can latch the redb handle.
+            // An index I/O error can latch the redb handle, so recovery reloads the checkpoint.
             redb::Error::Io(source) => Self::from(source).require_reopen(),
             source @ (redb::Error::Corrupted(_)
             | redb::Error::UpgradeRequired(_)

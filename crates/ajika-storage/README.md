@@ -34,11 +34,12 @@ let bytes = database.snapshot()?.read_value(&id, length)?;
 # }
 ```
 
-`commit` finishes buffered writes and synchronizes new packs before publishing their locations
-and records in one redb transaction. Dropping a write before commit leaves the previous
-checkpoint. A commit error can have an uncertain outcome: the owner then rejects further use
-until `Database::reopen` resolves the published checkpoint. The directory lock
-stays held, and the recovered catalog determines which new files are safe to remove.
+`commit` synchronizes new packs before publishing their locations and records in redb. Dropping
+a write before commit leaves the previous checkpoint intact.
+
+If a commit error's `requires_reopen()` is true, call `Database::reopen` on the same owner.
+If corruption prevents reopening, `Database::rebuild` can restore caller-supplied identities
+with an empty query catalog.
 
 Read views pin their backing files. Finish those views before starting a write; overlapping
 read/write scopes return an error. Returned buffers are owned and impose no such restriction.
@@ -54,12 +55,7 @@ can change without resetting the cache.
 
 One pack targets 64 MiB, with large individual values allowed to exceed it. Creating files is
 lazy: an entirely inline checkpoint needs none. The instance directory contains `owner.lock`,
-`index.redb`, and `packs/`. Keep the lock file in place when resetting contents. An incompatible
-epoch or confirmed corruption can cause a reset under that lock. If the index
-is unreadable, `Database::rebuild` can publish an empty catalog with caller-supplied
-identity assignments. On Unix, new files and
-directory entries are synchronized before publication; Windows can require cache reconstruction
-after power loss because equivalent directory-name durability is not implemented.
+`index.redb`, and `packs/`. Keep the lock file in place when resetting contents.
 
 ## Reclaiming space
 

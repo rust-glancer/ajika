@@ -153,7 +153,5 @@ A failed operation releases its working set and claims. A cache checkpoint may
 already have committed before a late cancellation, so the host still decides
 whether to publish the response. Automatic maintenance failures are logged.
 
-Keep using the same database after an error. If Ajika detected a storage fault
-that needs repair, the next `run` attempts it before invoking the callback. A
-failed repair returns a storage error. A capacity refusal still permits reads and
-reclamation. See [persistence](persistence.md) for the recovery behavior.
+A capacity refusal still permits reads and reclamation. Storage errors can
+schedule [cache repair](persistence.md#recovering-a-cache) for the next run.

@@ -70,7 +70,7 @@ pub(crate) struct Backend {
     store: Store,
     // Small retention inventory. Loading this does not populate the runtime's query memos.
     usage: Mutex<HashMap<Id, Usage>>,
-    // Workers can discover damage, but repair must wait until they release their read views.
+    // Keep the first fault that needs repair until the next run has exclusive access.
     recovery: OnceLock<Error>,
     bytes: AtomicU64,
 }
@@ -126,8 +126,9 @@ impl Backend {
 
     fn load_interner(database: &mut StorageDatabase) -> Result<crate::Interner> {
         let assignments = database.snapshot()?.identities()?;
-        // This bound applies before publishing the first interner. Live recovery cannot
-        // recycle IDs even if the interner has grown past this startup limit.
+        // At startup we can bound historical keys before callers receive their IDs. Reset
+        // the saved queries with the interner because queries can refer to those IDs.
+        // Live recovery keeps the existing assignments because callers already hold them.
         const MAX_INTERNER_BYTES: usize = 32 * 1024 * 1024;
         if assignments
             .iter()
@@ -141,6 +142,7 @@ impl Backend {
         crate::Interner::load(assignments)
     }
 
+    /// Restore retention bookkeeping or rebuild a corrupt cache with the live IDs.
     fn restore_usage(
         database: &mut StorageDatabase,
         interner: &crate::Interner,
@@ -192,6 +194,8 @@ impl Backend {
         let Store::Disk(database) = &mut self.store else {
             unreachable!("recovery belongs to disk storage")
         };
+        // Reopen after an uncertain commit to find the published checkpoint. Payload
+        // checksums are verified on read, so known corruption goes straight to a rebuild.
         let loaded = if reason.storage_needs_reopen() {
             (|| {
                 database.reopen()?;
@@ -200,7 +204,7 @@ impl Backend {
         } else {
             Err(reason)
         };
-        // Keep the original repair decision across temporary I/O failures.
+        // Leave repair pending until this succeeds so the next run can retry a temporary failure.
         let usage = Self::restore_usage(database, &self.interner, loaded)?;
         self.replace_usage(usage);
         self.recovery.take();
@@ -208,8 +212,9 @@ impl Backend {
     }
 
     fn replace_usage(&mut self, usage: HashMap<Id, Usage>) {
-        // Session records can borrow payloads from the prior disk catalog. Drop them with
-        // the old revision proofs even if reopening retained most of that checkpoint.
+        // A session record can point to a payload stored in a durable pack. Recovery may
+        // restore an older checkpoint with different packs and records, so clear the
+        // session cache. Saved queries will be validated against the installed inputs.
         self.session.get_mut().expect("session storage").clear();
         self.bytes.store(
             usage.values().map(|item| item.bytes).sum(),
@@ -775,8 +780,9 @@ impl Backend {
         Ok(removed.len())
     }
 
-    /// Discard all retained query work and reset its accounting. Captured inputs and interned
-    /// identities stay intact, so later queries can recompute from the same observations.
+    /// Discard retained query work. A healthy index can keep its saved identity table.
+    /// When the index needs repair, rebuild it from the live assignments so the same IDs
+    /// are available on restart.
     pub(crate) fn invalidate(&mut self) -> Result<()> {
         let result = match &mut self.store {
             Store::Memory(store) => {

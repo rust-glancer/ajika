@@ -83,20 +83,17 @@ Rust code. A different epoch discards the old cache on opening rather than migra
 
 ## Recovering a cache
 
-`open` and live recovery try to retain a usable checkpoint. Confirmed corruption
-can cause Ajika to discard query data and log a warning. Opening a compatible
-cache preserves readable saved identities. If the identity table is lost, opening
-starts with a fresh interner.
+A run that encounters a damaged value returns a storage error and leaves repair
+pending. The next uncancelled `run` on the same database attempts repair before
+invoking its callback. If repair fails, the caller receives that error.
+Maintenance can also discover damage after a successful run, so
+`database.recovery_pending()` reports whether repair is due between runs.
 
-If a request discovers corruption or encounters an uncertain commit, it returns
-the failure. Use `database.recovery_pending()` to anticipate repair work before
-the next uncancelled `run` invokes its callback. Automatic maintenance can also
-schedule repair after a successful run. Repair uses the same inputs and live
-interner. If the disk stays unavailable, `run` returns a storage error.
-
-Use `database.invalidate()` to explicitly discard query work. It can rebuild a
-damaged cache while preserving the live interner. `collect` and `compact` report
-storage failures so their work stays limited to reclamation.
+Live repair keeps the installed inputs and interner, as does
+`database.invalidate()` when the host chooses to clear saved work. If
+corruption forces Ajika to discard results, it logs a warning and recomputes
+them on demand. A new process gets its identity assignments from disk, so it
+starts with a fresh interner if the saved identity table is lost.
 
 ## A checkpoint is not application acceptance
 

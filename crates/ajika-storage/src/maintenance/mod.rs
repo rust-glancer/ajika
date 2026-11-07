@@ -33,6 +33,7 @@ impl Database {
         if self.maintenance_due.swap(false, Ordering::Relaxed)
             && let Err(error) = self.compact_step(false)
         {
+            // A temporary error can interrupt reclamation. Keep the pass due for a later call.
             self.maintenance_due.store(true, Ordering::Relaxed);
             return Err(error.at(&self.root));
         }

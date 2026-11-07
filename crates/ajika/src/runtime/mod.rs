@@ -237,8 +237,10 @@ impl<S: Send + Sync + 'static> Database<S> {
     /// Failure before checkpointing discards pending work, including successful child queries.
     /// The host should reject inconsistent captured inputs before returning from the callback.
     /// A late cancellation can still return an error after a commit. Automatic maintenance
-    /// failures are logged. If cache recovery is needed, the next run attempts it before
-    /// invoking its callback, using the same inputs and interner.
+    /// failures are logged. When [`recovery_pending`](Self::recovery_pending) is true, the next
+    /// uncancelled run attempts repair before invoking its callback. Repair uses the same inputs
+    /// and interner. If repair fails, `run` returns a storage error. Each run invokes its callback
+    /// at most once.
     ///
     /// The callback uses the same [`Result`] as query providers. A recorded query failure takes
     /// precedence over cancellation, including cancellation returned directly by the callback.
@@ -251,8 +253,8 @@ impl<S: Send + Sync + 'static> Database<S> {
         // Reset cancellation after a panic too, so a host that catches it can start another
         // operation. Working memos and query claims clean up through their own scopes.
         let outcome = panic::catch_unwind(panic::AssertUnwindSafe(|| {
-            // Repair runs at the exclusive boundary, before the callback or its workers can
-            // borrow the cache. A request cancelled before entry can skip that work.
+            // Repair while this run still owns the cache exclusively. Check cancellation
+            // first so an obsolete request leaves repair for the next one.
             if let Err(error) = self
                 .cancellation
                 .inner
@@ -317,8 +319,9 @@ impl<S: Send + Sync + 'static> Database<S> {
         match outcome {
             Ok((result, statistics)) => {
                 self.statistics = statistics;
-                // Reclamation can still make progress after a capacity refusal. Its failure
-                // must not replace either a completed answer or the error that stopped the run.
+                // Reclaim space after releasing the working set. A capacity refusal can
+                // still leave obsolete packs to reclaim. Log maintenance failures so the
+                // caller gets the completed answer or the original error.
                 let maintenance = if result.is_ok()
                     && (self.last_collection.elapsed() >= Duration::from_secs(60)
                         || self.backend.over_budget(self.retention))

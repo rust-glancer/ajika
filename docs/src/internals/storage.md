@@ -53,8 +53,6 @@ Ajika uses short reads while evaluating, then writes at the operation boundary.
 
 The [transaction implementation](https://github.com/rust-glancer/ajika/blob/main/crates/ajika-storage/src/transaction/mod.rs#L185) contains the commit sequence that makes pack
 locations visible. On Unix, it synchronizes directory entries as well as files.
-The Windows path does not provide equivalent directory-name durability after
-power loss, so that case may require rebuilding the cache.
 
 ## Compression belongs to individual values
 
@@ -131,10 +129,13 @@ cache together before handing either out.
 
 ## Rebuildable, with explicit boundaries
 
-Startup and live recovery keep the owner lock while reopening or replacing the
-index. An epoch change or confirmed corruption can discard query records and
-packs. Ajika keeps the live interner during recovery and validates its assignments
-against a recovered checkpoint before reusing query data.
+Recovery holds `owner.lock` while reopening or replacing the index. Storage
+prepares a replacement catalog at a temporary path and renames it to `index.redb`.
+On Unix it syncs the directory before removing packs the old catalog could still
+reference if a crash rolls back the rename.
+
+Ajika checks recovered IDs against the live interner before reusing queries.
+A rebuild saves the live IDs with an empty query catalog.
 
 The format is for application-owned, throwaway cache data, not hostile input or
 authoritative user documents. Recovery aims to retain a coherent checkpoint or

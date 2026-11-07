@@ -29,7 +29,8 @@ const INDEX_FILE: &str = "index.redb";
 const INDEX_CACHE_BYTES: usize = 8 * 1024 * 1024;
 const REBUILD_FILE: &str = "index.rebuild.redb";
 
-/// An interned key and its stable ID within a namespace.
+/// A key and its assigned ID within a namespace. Pass existing assignments to
+/// [`Database::rebuild`] so callers can keep using their IDs after an index is replaced.
 #[derive(Debug, Clone, Copy)]
 pub struct Identity<'a> {
     pub namespace: &'a str,
@@ -60,6 +61,7 @@ impl Default for Options {
 /// Reads borrow this owner, and a write excludes reads until publication and file retirement
 /// finish. Callers should keep these scopes short and retain decoded values instead of readers.
 pub struct Database {
+    // Recovery can drop the redb handle while `_owner` keeps the directory locked.
     index: Option<redb::Database>,
     epoch: String,
     pub(crate) root: PathBuf,
@@ -112,7 +114,8 @@ impl Database {
                 if error.kind() != ErrorKind::InvalidCache {
                     return Err(error);
                 }
-                // A missing or damaged pack need not cost the caller its saved identities.
+                // Pack damage can leave the identity table intact. Try clearing query data
+                // first so callers can still load those assignments.
                 let identities_discarded = match database.reset(None) {
                     Ok(()) => false,
                     Err(reset) if reset.kind() == ErrorKind::InvalidCache => {
@@ -134,8 +137,10 @@ impl Database {
         result.map_err(|error| error.at(path))
     }
 
-    /// Reload the disk checkpoint while retaining ownership of the directory. A failed reload
-    /// leaves reads and writes unavailable until a reload or rebuild succeeds.
+    /// Reload the disk checkpoint while retaining the directory lock.
+    ///
+    /// After an uncertain commit, the recovered index tells us which packs to keep.
+    /// If reopening fails, reads and writes resume after a successful reopen or rebuild.
     pub fn reopen(&mut self) -> Result<()> {
         self.load(false)
             .map_err(|error| error.require_reopen().at(&self.root))
@@ -158,6 +163,8 @@ impl Database {
         let index = if create {
             builder.create(&path)?
         } else {
+            // Callers may already hold IDs from this cache. A missing index needs recovery
+            // so the caller can republish those assignments.
             builder.open(&path).map_err(|error| match error {
                 redb::DatabaseError::Storage(redb::StorageError::Io(source))
                     if source.kind() == io::ErrorKind::NotFound =>
@@ -201,6 +208,8 @@ impl Database {
             (compatible, instance)
         };
         if !compatible {
+            // Publish the new epoch and cleared catalog together. A restart uses the
+            // epoch to decide whether saved query records are compatible.
             Self::clear_catalog(&write, initialize)?;
         }
         write.commit()?;
@@ -213,7 +222,8 @@ impl Database {
         drop(read.open_table(IDENTITIES)?);
         drop(read.open_table(RECORDS)?);
         drop(read.open_table(VALUES)?);
-        // Opening checks pack existence and framing. Reads verify payload checksums on demand.
+        // Check the files and their headers up front. Verifying each payload on demand
+        // keeps opening a large cache from reading gigabytes of saved results.
         for entry in read.open_table(PACKS)?.iter()? {
             let (id, bytes) = entry?;
             let info: PackInfo = format::decode(bytes.value())?;
@@ -248,9 +258,11 @@ impl Database {
     fn finish_open(&mut self) -> Result<()> {
         fs::create_dir_all(&self.packs)?;
         self.files.get_mut().expect("pack handles").clear();
-        // A replacement index must be durable before retiring files the old catalog could name.
+        // Sync the directory before deleting old packs. If a crash restores the old
+        // `index.redb` directory entry, that catalog still needs its packs.
         PackWriter::sync_directory(&self.root)?;
         if let Err(error) = self.clean_orphans() {
+            // Pack deletion can wait. An unreadable catalog blocks recovery.
             if error.requires_reopen() || error.kind() == ErrorKind::InvalidCache {
                 return Err(error);
             }
@@ -327,6 +339,8 @@ impl Database {
     }
 
     fn reset(&mut self, identities: Option<&[Identity<'_>]>) -> Result<()> {
+        // `None` means keep the saved identity table, so the index must be readable.
+        // With `Some`, we have the assignments needed to build a fresh index if necessary.
         match (self.clear_index(identities), identities) {
             (Ok(()), _) => {}
             (Err(error), Some(identities)) if error.kind() == ErrorKind::InvalidCache => {
@@ -378,7 +392,8 @@ impl Database {
         self.index.take();
         self.files.get_mut().expect("pack handles").clear();
         let replacement = self.root.join(REBUILD_FILE);
-        // A restart can still use the published index if preparation was interrupted.
+        // Build the new catalog at a temporary path. If recovery stops before the rename,
+        // the next opener can still inspect the published index and retry the repair.
         self.remove_replacement()?;
         let index = redb::Database::builder()
             .set_cache_size(INDEX_CACHE_BYTES)

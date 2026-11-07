@@ -139,8 +139,11 @@ impl Interner {
         Ok(interner)
     }
 
-    /// A recovered checkpoint may have saved a different prefix than this process observed.
-    /// Compare the whole saved mapping before letting any of its query records be reused.
+    /// Check the disk IDs against the live interner before reusing a recovered checkpoint.
+    ///
+    /// If a namespace has three saved IDs and five live IDs, check the first three
+    /// assignments and leave the other two pending. If a saved ID names a different key,
+    /// a query in that checkpoint could refer to the wrong input.
     pub(crate) fn reconcile(&self, rows: &[(String, u32, Vec<u8>)]) -> Result<()> {
         let mut state = self.state.lock().expect("interner state");
         let mut prefixes = HashMap::<&str, usize>::new();
@@ -162,8 +165,9 @@ impl Interner {
         Ok(())
     }
 
+    /// Save the live assignments with an empty query catalog so the same IDs survive restart.
     pub(crate) fn rebuild(&self, database: &mut StorageDatabase) -> Result<()> {
-        // Cloned keys let the host keep interning while the replacement is written.
+        // Snapshot the key handles so the host can keep interning while we write to disk.
         let snapshot = self
             .state
             .lock()
@@ -182,8 +186,8 @@ impl Interner {
                 })
             })
             .collect::<Vec<_>>();
-        // Publish the saved prefix and empty query catalog together. IDs allocated after the
-        // snapshot stay pending for the next checkpoint.
+        // Mark only the snapshot as saved. IDs allocated during the rebuild stay pending
+        // for the next checkpoint.
         database.rebuild(&identities)?;
         self.checkpointed(snapshot.into_iter().map(|(name, keys)| (name, keys.len())));
         Ok(())
