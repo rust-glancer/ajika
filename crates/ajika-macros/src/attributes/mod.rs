@@ -1,5 +1,4 @@
-//! Decide which generated item inherits each attribute. Leave placement of `#[...]` and
-//! `#![...]` to syn's item printers rather than rebuilding that syntax ourselves.
+//! Route declaration attributes to the generated items they apply to.
 
 use syn::{AttrStyle, Attribute, Meta, Path, Token, punctuated::Punctuated};
 

@@ -29,9 +29,8 @@ const SMALL_PACK_BYTES: u64 = PASS_BYTES / 4;
 const SMALL_PACK_COUNT: usize = 8;
 
 impl Database {
-    /// Perform one small maintenance pass between query operations. Ordinary writes mark work
-    /// pending; a read-only operation usually needs only this flag check. A pass bounds scanned
-    /// bytes and frames, but finishes an individual frame even if that frame exceeds the budget.
+    /// Run one small reclamation pass between operations if needed. A single large value can
+    /// make the pass exceed its usual work budget.
     pub fn maintain(&self) -> Result<()> {
         if self.maintenance_due.swap(false, Ordering::Relaxed) {
             self.compact_step(false)?;

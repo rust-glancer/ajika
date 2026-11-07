@@ -1,21 +1,10 @@
-//! Declarations for Ajika queries, typed inputs, output handles, and interned IDs. Storage and dependency
-//! tracking live in the runtime; these macros connect functions and field declarations to it.
+//! Declare Ajika queries, typed inputs, output handles, and interned IDs.
 //!
-//! Each entry point parses Rust syntax, prepares a validated declaration, and emits its template.
-//! `declaration` owns signatures/options and `attributes` owns attribute scope. `query`
-//! prepares free or associated wrappers, providers and registration. `input` turns a keyed struct into a
-//! handle whose getters and setters read and update independently tracked fields.
-//! `interned` gives immutable fields a compact ID through the database's interner.
-//! `output` turns payload fields into handles and a constructor that emits named query outputs.
-//!
-//! For example, a declaration `fn words(db: &Db, file: File) -> Result<Words>` becomes:
-//!
-//! - a function `words(db, file)` that calls `db.query::<words>(file)` and returns `Result<Arc<Words>>`;
-//! - a marker type `words` whose Query implementation runs the original body and wraps its value;
-//! - a registration entry so validation can replay a saved child without its caller running.
-//!
-//! The runtime cannot tell whether the trait implementation was written by hand or generated.
-//! Changes to persistence, scheduling, or dependency validation therefore belong in Ajika itself.
+//! - [`query`] turns a function into a reusable computation. A body returning `Result<T>` normally
+//!   gives callers `Result<Arc<T>>`.
+//! - [`input`] generates getters and setters for independently tracked input fields.
+//! - [`output`] generates handles for separately readable query outputs.
+//! - [`interned`] gives a set of immutable fields a compact ID and generates getters for them.
 
 mod attributes;
 mod declaration;

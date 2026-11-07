@@ -71,7 +71,7 @@ pub enum Lifetime {
 /// top-level calls. [`stored_queries`](Statistics::stored_queries) and
 /// [`stored_bytes`](Statistics::stored_bytes) describe storage after the operation.
 ///
-/// Payload I/O counts exclude metadata and redb page overhead. For example, an equal
+/// Payload I/O counts exclude metadata and index overhead. For example, an equal
 /// recomputation can write zero payload bytes while still replacing its saved dependency list.
 #[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
 pub struct Statistics {
@@ -86,9 +86,9 @@ pub struct Statistics {
     pub metadata_reads: u64,
     /// Disk output-header reads, shared by all callers of a producer within an operation.
     pub header_reads: u64,
-    /// Query-record rows written by checkpointing, including metadata-only updates.
+    /// Query records written by checkpointing, including metadata-only updates.
     pub metadata_writes: u64,
-    /// Encoded query-record bytes written by checkpointing; excludes index-page overhead.
+    /// Encoded query-record bytes written by checkpointing, excluding index overhead.
     pub metadata_bytes_written: u64,
     /// Values decoded from storage, including old values loaded for equality comparisons.
     pub decoded: u64,
@@ -109,7 +109,7 @@ pub struct Statistics {
     pub collected: u64,
     /// Complete cache records after the operation's optional collection.
     pub stored_queries: u64,
-    /// Logical encoded bytes, excluding redb page overhead and allocator capacity.
+    /// Logical encoded bytes, excluding index overhead and allocator capacity.
     /// The typed memory backend does not serialize values to produce this counter.
     pub stored_bytes: u64,
     /// Session records retained after the operation, separate from the durable cache.

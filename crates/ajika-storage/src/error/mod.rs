@@ -1,4 +1,7 @@
-//! Stable recovery categories, independent of the index and compression implementations.
+//! Error classification for the storage layer.
+//!
+//! Readers and writers keep the original I/O or decoding error for diagnostics. The category
+//! lets callers decide whether to retry, reclaim space, or discard unreadable backing.
 
 use std::{
     error::Error as StdError,
@@ -7,7 +10,8 @@ use std::{
     sync::Arc,
 };
 
-/// Return the supplied error when a required condition fails.
+/// Return early when a required condition fails. The error expression runs only on failure,
+/// so callers can format details inline.
 macro_rules! ensure {
     ($condition:expr, $error:expr $(,)?) => {
         if !($condition) {
@@ -21,16 +25,24 @@ pub(crate) use ensure;
 pub type Result<T> = std::result::Result<T, Error>;
 type BoxError = Box<dyn StdError + Send + Sync>;
 
-/// The decisions a storage caller can make without inspecting dependency-specific errors.
+/// What went wrong at the storage boundary. Check [`Error::requires_reopen`] separately
+/// to see whether the failed operation made the owner unusable.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 #[non_exhaustive]
 pub enum ErrorKind {
+    /// Another owner has this cache open. Wait for it to close or use another cache directory.
     InUse,
+    /// A write exceeded the byte budget. Reads and reclamation can still proceed.
     Capacity,
+    /// Saved data is missing, invalid, or incompatible. The caller can discard the cache.
     InvalidCache,
+    /// A read or write conflicts with active access. Finish the active scope before retrying.
     AccessConflict,
+    /// An I/O operation failed, for example because file access was denied.
     Io,
+    /// An earlier failure stopped the owner or the current write from accepting work.
     Unavailable,
+    /// A storage failure outside the other categories, such as a compression failure.
     Unexpected,
 }
 
@@ -69,8 +81,6 @@ macro_rules! index_error {
 }
 
 /// A storage failure with its original cause and optional filesystem context.
-/// Classification describes the cause; [`requires_reopen`](Self::requires_reopen) separately
-/// records whether a failed publication made the owner's state uncertain.
 #[derive(Clone, Debug)]
 pub struct Error {
     inner: Arc<Details>,
@@ -92,15 +102,20 @@ impl Error {
         self.inner.kind
     }
 
+    /// A path attached for diagnostics, such as the directory of a failed open.
     pub fn path(&self) -> Option<&Path> {
         self.inner.path.as_deref()
     }
 
+    /// Whether the owner must be reopened before it can serve reads or writes again.
+    /// A failed append can affect just the current write. A failed index commit can also leave
+    /// the published checkpoint uncertain, so reopening must resolve it first.
     pub fn requires_reopen(&self) -> bool {
         self.inner.reopen
     }
 
-    /// The I/O error remains directly accessible even when it originated inside redb or decoding.
+    /// Inspect the immediate I/O cause when one is available. For example, a missing pack can
+    /// report [`ErrorKind::InvalidCache`] and still carry [`io::ErrorKind::NotFound`].
     pub fn io_error(&self) -> Option<&io::Error> {
         self.source()?.downcast_ref()
     }

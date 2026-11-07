@@ -28,9 +28,8 @@ use crate::{
 #[derive(Debug, Clone, Copy)]
 pub struct Options {
     pub compression: Compression,
-    /// Physical budget, including obsolete files and the index. Normal payload writes leave
-    /// room for one compaction pass. This is a soft limit: index growth within a checkpoint or
-    /// moving one oversized frame can exceed it. Maintenance and removals remain available.
+    /// Soft limit on disk usage, including obsolete files and the index.
+    /// Maintenance and removals remain available when the limit is exceeded.
     pub max_physical_bytes: u64,
 }
 
@@ -64,8 +63,9 @@ pub struct Database {
 }
 
 impl Database {
-    /// Open an instance, resetting incompatible or unreadable contents while still owning its
-    /// directory lock. Format changes discard derivable data; no schema migration is attempted.
+    /// Open the cache and hold its directory lock for as long as the owner is alive.
+    /// An incompatible format or an unreadable pack can cause a reset while holding that lock.
+    /// Keep only data the application can rebuild in this directory.
     pub fn open(path: &Path, epoch: &str, options: Options) -> Result<Self> {
         let result = (|| -> Result<Self> {
             fs::create_dir_all(path)?;
@@ -126,6 +126,7 @@ impl Database {
             database.refresh_physical_bytes()?;
             Ok(database)
         })();
+        // Give the caller the cache path for failures from any part of opening it.
         result.map_err(|error| error.at(path))
     }
 
@@ -211,13 +212,12 @@ impl Database {
         self.options.compression = compression;
     }
 
-    /// Keep a consistent index view and pin its packs until the reader drops.
+    /// Open a consistent read view.
     pub fn snapshot(&self) -> Result<Read<'_>> {
         Read::new(self).map_err(|error| error.at(self.root.clone()))
     }
 
-    /// Begin one checkpoint. Drop any reader first: publication needs exclusive access so old
-    /// pack files can be removed as soon as their last committed location is replaced.
+    /// Begin one checkpoint. Drop all read views first so the writer has exclusive access.
     pub fn begin_write(&self) -> Result<Write<'_>> {
         Write::new(self).map_err(|error| error.at(self.root.clone()))
     }
@@ -256,6 +256,7 @@ impl Database {
     }
 
     pub(crate) fn write_budget(&self) -> u64 {
+        // Leave space for a maintenance pass to copy live values before removing old files.
         let headroom = (self.options.max_physical_bytes / 8).min(super::maintenance::PASS_BYTES);
         self.options
             .max_physical_bytes
@@ -306,8 +307,8 @@ impl Database {
         Ok(())
     }
 
-    /// Inspect contents without decoding query payloads. This scans index rows and file metadata,
-    /// so callers should use it for diagnostics rather than after every small request.
+    /// Inspect contents without decoding payloads. This scans storage metadata, so use it for
+    /// diagnostics.
     pub fn statistics(&self) -> Result<Statistics> {
         let read = self.snapshot()?;
         Statistics::read_index(&read.transaction, &self.root)

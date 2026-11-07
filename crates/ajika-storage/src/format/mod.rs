@@ -3,6 +3,9 @@
 //! A logical value ID survives replacement. A pack ID never gets reused, and a location names
 //! one immutable frame. This distinction lets later compaction move bytes without changing
 //! anything in the caller's dependency records.
+//!
+//! The decoder classifies errors here because index entries and headers describe storage's
+//! own backing. Callers choose how to handle decoding failures in their opaque payloads.
 
 use redb::TableDefinition;
 use wincode::{SchemaRead, SchemaReadOwned, SchemaWrite, config::DefaultConfig};

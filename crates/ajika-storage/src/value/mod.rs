@@ -12,22 +12,22 @@ use crate::{Error, Result, error::ensure};
 
 pub(crate) const INLINE_BYTES: usize = 1024;
 
-/// The space/CPU choice for new values. Readers use the codec saved with each value.
+/// The space and CPU trade-off for new values. Choosing a different option for an
+/// existing database keeps the existing values readable.
 #[derive(Debug, Default, Clone, Copy, PartialEq, Eq, SchemaRead, SchemaWrite)]
 pub enum Compression {
     /// Store the caller's bytes directly.
     None,
-    /// LZ4 frames: prioritize inexpensive encoding and decoding.
+    /// LZ4 frames prioritize inexpensive encoding and decoding.
     #[default]
     Lz4,
-    /// Zstd frames at level three: spend more encoding work on smaller storage.
+    /// Zstd frames prioritize smaller stored values.
     Zstd,
 }
 
 impl Compression {
-    /// Compress one already serialized value. Tiny values remain raw and inline in the index.
-    /// Also keep the original if compression saves less than one eighth: a marginal reduction
-    /// should not impose a decompressor on every future load.
+    /// Prepare one serialized value for storage. Small values and values that compress poorly
+    /// can be stored as-is.
     pub fn encode(self, bytes: Vec<u8>) -> Result<EncodedValue> {
         let raw_length = bytes.len() as u64;
         let mut compression = Self::None;
@@ -42,6 +42,7 @@ impl Compression {
                 }
                 Self::Zstd => zstd::stream::encode_all(encoded.as_slice(), 3)?,
             };
+            // Require meaningful savings before adding decompression work to every future read.
             if compressed.len() < encoded.len() - encoded.len() / 8 {
                 encoded = compressed;
                 compression = self;
@@ -94,8 +95,7 @@ impl Compression {
     }
 }
 
-/// An owned value ready to append. Its checksum covers the stored bytes, before decompression.
-/// Keeping this separate from a transaction lets a caller prepare a bounded batch in parallel.
+/// An owned value ready to write. Callers can prepare a batch in parallel before opening a write.
 pub struct EncodedValue {
     pub(crate) raw_length: u64,
     pub(crate) compression: Compression,

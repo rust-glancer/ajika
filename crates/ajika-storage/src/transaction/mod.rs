@@ -26,8 +26,8 @@ use crate::{
     value::INLINE_BYTES,
 };
 
-/// A checkpoint under construction. Dropping it before commit discards its index changes and
-/// provisional files. Reads must finish before beginning a write on the same database.
+/// A checkpoint under construction. Dropping it before commit preserves the previous checkpoint.
+/// Reads must finish before beginning a write on the same database.
 pub struct Write<'a> {
     pub(crate) transaction: redb::WriteTransaction,
     database: &'a Database,
@@ -182,9 +182,10 @@ impl<'a> Write<'a> {
         Ok(())
     }
 
-    /// Synchronize new files before publishing their locations. A commit error is ambiguous:
-    /// the database may contain the new checkpoint, so leave files intact and require reopen.
+    /// Publish the checkpoint atomically. If the outcome is uncertain, the returned error's
+    /// [`requires_reopen`](Error::requires_reopen) method returns `true`.
     pub fn commit(mut self) -> Result<()> {
+        // Sync new packs before committing an index that can reference them.
         let sync_time = self.packs.finish()?;
         {
             let mut table = self.transaction.open_table(PACKS)?;
@@ -196,6 +197,8 @@ impl<'a> Write<'a> {
                 }
             }
         }
+        // Once commit is attempted, either checkpoint may be visible on failure. Leave pack
+        // cleanup to reopening in that case so both possible checkpoints keep their files.
         self.packs.commit_attempted();
         let committing = Instant::now();
         if let Err(error) = self.transaction.commit() {
@@ -236,7 +239,7 @@ impl<'a> Write<'a> {
     }
 }
 
-/// A short consistent view. Returned byte buffers do not retain the transaction or file handles.
+/// A consistent read view. Returned byte buffers remain usable after the view is dropped.
 pub struct Read<'a> {
     pub(crate) transaction: redb::ReadTransaction,
     database: &'a Database,
@@ -285,8 +288,8 @@ impl<'a> Read<'a> {
         Ok(table.get(id)?.map(|bytes| bytes.value().to_vec()))
     }
 
-    /// Read and validate one frame, then decode its compression. Integrity is checked before
-    /// the caller's deserializer sees bytes. Other values in the pack are not read or decoded.
+    /// Read one value as owned, uncompressed bytes without reading other payloads.
+    /// A missing or malformed value reports [`crate::ErrorKind::InvalidCache`].
     pub fn read_value(&self, id: &Id, length: u64) -> Result<Vec<u8>> {
         let location: Location = {
             let table = self.transaction.open_table(VALUES)?;

@@ -64,7 +64,7 @@ impl Frame {
             .depend(dependency, durability, lifetime);
     }
 
-    /// Reuse a read made through this frame, without revisiting the producer's shared locks.
+    /// Reuse a read made through this frame.
     /// The caller still checks cancellation. A miss must use normal evaluation and record its
     /// dependency before installing the value here.
     pub(crate) fn acquired<T: Send + Sync + 'static>(

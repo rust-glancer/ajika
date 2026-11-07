@@ -1,4 +1,7 @@
-//! One result type carries expected cancellation and actionable failure categories.
+//! Reasons a query or database operation stopped.
+//!
+//! The request boundary handles cancellation when a newer request makes an answer obsolete.
+//! For a failure, the error keeps both the category a caller can act on and the cause it can log.
 
 use std::{error::Error as StdError, fmt, io, path::Path, sync::Arc};
 
@@ -6,7 +9,8 @@ use ajika_storage::Error as StorageError;
 
 use crate::{PersistenceErrorKind, QueryCycle};
 
-/// Return the supplied error when a required condition fails.
+/// Return early when a required condition fails. The error expression runs only on failure,
+/// so callers can format details inline.
 macro_rules! ensure {
     ($condition:expr, $error:expr $(,)?) => {
         if !($condition) {
@@ -21,8 +25,8 @@ pub type Result<T> = std::result::Result<T, Error>;
 
 type BoxError = Box<dyn StdError + Send + Sync>;
 
-/// The cooperative checkpoint at which an operation observed that its answer was obsolete.
-/// It makes no promise that a completed cache checkpoint was rolled back.
+/// A request stopped at a cooperative check because its answer was no longer needed.
+/// A cache write may already have committed when the request observes cancellation.
 #[derive(Clone, Copy, Debug, PartialEq, Eq, thiserror::Error)]
 #[error("operation cancelled at {checkpoint}")]
 pub struct Cancelled {
@@ -30,6 +34,7 @@ pub struct Cancelled {
 }
 
 impl Cancelled {
+    /// Adapt an external cancellation signal with a label such as `"request superseded"`.
     pub fn at(checkpoint: &'static str) -> Self {
         Self { checkpoint }
     }
@@ -65,7 +70,9 @@ enum PersistenceRepr {
     Unavailable(String),
 }
 
-/// Persistence failures include saved query decoding as well as the byte storage layer.
+/// A failure accessing Ajika's saved work. A query record that cannot be decoded and
+/// a damaged storage frame both report [`PersistenceErrorKind::InvalidCache`]. Use
+/// [`Error::requires_reopen`] to decide whether the owner can still serve queries.
 #[derive(Debug, thiserror::Error)]
 #[error(transparent)]
 pub struct PersistenceError(PersistenceRepr);
@@ -102,16 +109,25 @@ impl PersistenceError {
     }
 }
 
-/// A borrowed classification keeps useful payloads available without exposing implementation errors.
+/// The reason an operation stopped, with details for callers that can act on it.
+/// For example, a cycle includes the calls to show in a diagnostic. A persistence failure can
+/// distinguish a full cache from unreadable contents.
 #[derive(Debug)]
 #[non_exhaustive]
 pub enum ErrorKind<'a> {
+    /// Work stopped because the caller no longer needed its answer.
     Cancelled(&'a Cancelled),
+    /// Active query calls formed a dependency cycle.
     Cycle(&'a QueryCycle),
+    /// A required input, output, or interned identity could not be found.
     Unavailable(&'a UnavailableData),
+    /// Ajika could not open, read, or update its saved work.
     Persistence(&'a PersistenceError),
+    /// Application code failed, for example while reading an input file.
     Application(&'a (dyn StdError + Send + Sync + 'static)),
+    /// A query rule was violated, such as emitting the same output slot twice.
     Contract,
+    /// The runtime failed without a specific recovery action for the caller.
     Unexpected,
 }
 
@@ -145,8 +161,10 @@ enum ErrorRepr {
     Invariant(String),
 }
 
-/// An operation produced no answer. Inspect cancellation at the request boundary; other errors
-/// retain their recovery category and original cause when shared across query workers.
+/// Why an Ajika operation stopped. Workers can share the same error so the caller gets its
+/// original cause even when another worker was the first to see it.
+/// Use [`Error::is_cancelled`] at the request boundary and [`Error::kind`] when a particular
+/// failure needs recovery.
 #[derive(Clone, Debug)]
 pub struct Error {
     inner: Arc<ErrorRepr>,
@@ -176,21 +194,35 @@ impl Error {
         }
     }
 
-    /// Whether this is an expected stop because the caller no longer needs the answer.
+    /// Whether the operation stopped because the caller no longer needs the answer. Inside a
+    /// request, propagate the error with `?` until the code that decides whether to publish a reply.
+    ///
+    /// A handler can skip the reply when a newer request supersedes it.
+    ///
+    /// ```
+    /// fn reply<T>(result: ajika::Result<T>) -> ajika::Result<Option<T>> {
+    ///     match result {
+    ///         Ok(value) => Ok(Some(value)),
+    ///         Err(error) if error.is_cancelled() => Ok(None),
+    ///         Err(error) => Err(error),
+    ///     }
+    /// }
+    /// ```
     pub fn is_cancelled(&self) -> bool {
         matches!(self.kind(), ErrorKind::Cancelled(_))
     }
 
-    /// The application extension point is explicit so an existing Ajika failure is never
-    /// accidentally erased by a blanket conversion for all standard errors.
+    /// Attach a failure from application code. For example, use `.map_err(Error::application)`
+    /// when acquiring an input from a file. Propagate Ajika errors with `?` to keep their category.
     ///
     /// Accepts concrete errors, boxed standard errors, and reports such as `anyhow::Error`.
-    /// Concrete errors remain downcastable; a report's conversion to a boxed standard error
-    /// may erase that ability. Pass the concrete error when callers need typed recovery.
+    /// Pass the concrete error when callers need typed recovery. Boxing an `anyhow::Error`
+    /// keeps its diagnostic chain and may erase downcasts to the original error type.
     pub fn application(source: impl Into<Box<dyn StdError + Send + Sync>>) -> Self {
         Self::new(ErrorRepr::Application(source.into()))
     }
 
+    /// Report a violated query rule, for example when a validator finds an invalid arena index.
     pub fn contract(message: impl Into<String>) -> Self {
         Self::new(ErrorRepr::Contract {
             message: message.into(),
@@ -198,6 +230,8 @@ impl Error {
         })
     }
 
+    /// Add a message about the failed step, such as `"loading analysis inputs"`. The original
+    /// cause, category, and recovery status remain available. Cancellation keeps its checkpoint.
     pub fn context(self, message: impl Into<String>) -> Self {
         if self.is_cancelled() {
             return self;
@@ -212,8 +246,8 @@ impl Error {
         }
     }
 
-    /// Whether this operation left the owner unusable. Recovery status belongs to this outer
-    /// error, rather than to the underlying cause, which may also occur during a healthy read.
+    /// Whether the database needs recovery before serving more queries. A failed checkpoint
+    /// can leave the owner unusable even when a healthy read could return the same I/O cause.
     pub fn requires_reopen(&self) -> bool {
         self.reopen
     }
@@ -319,7 +353,7 @@ impl From<getrandom::Error> for Error {
     }
 }
 
-/// Diagnostic context preserves the error's category and cancellation checkpoint.
+/// Apply [`Error::context`] while propagating a failed result.
 pub trait ResultExt: Sized {
     fn context(self, message: impl Into<String>) -> Self;
 }

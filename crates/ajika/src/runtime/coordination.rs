@@ -149,8 +149,7 @@ pub(crate) struct Coordination {
 }
 
 impl Coordination {
-    /// Let a running worker notice that it must stop, returning cancellation or the first failure.
-    /// The normal path only reads atomic flags; it needs the mutex when retrieving a failure's cause.
+    /// Report why the worker must stop. A recorded failure takes precedence over cancellation.
     pub(crate) fn check(&self) -> Result<()> {
         if self.failed.load(Ordering::Acquire) {
             let failure = self
@@ -168,8 +167,9 @@ impl Coordination {
         Ok(())
     }
 
-    /// Preserve the first error and notify every waiter that no more results should be accepted.
-    /// Recording this centrally matters even when a provider catches its own returned error.
+    /// Record why work stopped and wake every waiter. Keep the first failure even if a caller
+    /// catches it. If cancellation arrived first, a later failure replaces it so the host can
+    /// still report the cause.
     pub(crate) fn fail(&self, failure: Error) {
         let mut state = self.state.lock().expect("claim state");
         if state.failure.is_none()

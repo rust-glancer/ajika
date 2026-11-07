@@ -86,13 +86,12 @@ pub(crate) struct Record {
     pub(crate) lifetime: Lifetime,
 }
 
-/// A shareable collection of captured input values. Cloning shares the same observations; use
-/// [`edit`](Self::edit) to produce a changed snapshot. Only changed field tables are copied, and
-/// their values follow the declaration's normal `Clone` semantics (usually an `Arc` for large data).
+/// A shareable collection of captured input values. Cloning shares the same observations.
+/// Use [`edit`](Self::edit) to prepare a new snapshot without changing the original.
 ///
-/// [`overlay`](Self::overlay) starts a sparse view over a saved snapshot. This is useful for editor
-/// buffers: the view owns changed files while sharing all saved inputs. Build successive editor
-/// views from the saved snapshot, rather than chaining a new view onto every keystroke.
+/// [`overlay`](Self::overlay) starts a sparse view over a saved snapshot. An editor can override
+/// changed files and share the other captured values. Use the saved snapshot as the base for
+/// successive editor views so lookup does not have to traverse every previous view.
 #[derive(Clone, Default)]
 pub struct Inputs {
     tables: Arc<RwLock<HashMap<TypeId, Arc<dyn ErasedTable>>>>,

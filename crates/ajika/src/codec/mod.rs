@@ -4,6 +4,9 @@
 //! use the same wincode configuration for saved keys, dependency records, and result payloads.
 //! Storage decides how those bytes are buffered or split into blocks; this module keeps their
 //! encoding consistent and independent of the particular storage operation.
+//!
+//! A decode failure here means Ajika's own encoding is invalid. A provider parsing application
+//! data can attach its parsing error with [`Error::application`].
 
 use wincode::{SchemaReadOwned, SchemaWrite};
 
@@ -39,8 +42,6 @@ pub(crate) fn encoded_size<T: Persist>(value: &T) -> Result<u64> {
 /// Decode exactly one owned value. Reject unconsumed bytes instead of silently accepting only
 /// a prefix of the saved encoding.
 pub(crate) fn decode<T: Persist>(bytes: &[u8]) -> Result<T> {
-    // These bytes belong to Ajika's representation. A provider decoding its own input instead
-    // uses Error::application; the codec dependency alone cannot determine recovery policy.
     wincode::config::deserialize_exact(bytes, CONFIG).map_err(Error::cache_decode)
 }
 
