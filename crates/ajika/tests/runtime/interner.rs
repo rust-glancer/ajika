@@ -1,3 +1,5 @@
+use std::sync::Arc;
+
 use ajika as renamed;
 use ajika::Database;
 use anyhow::Result;
@@ -116,9 +118,14 @@ fn truncate_only_pack(root: &std::path::Path) -> Result<()> {
     Ok(())
 }
 
-#[test]
-fn cache_recovery_keeps_identity_assignments() -> Result<()> {
-    for recovery in ["next run", "invalidate", "restart"] {
+struct DamagedCache {
+    root: tempfile::TempDir,
+    db: Database,
+    saved: Arc<File>,
+}
+
+impl DamagedCache {
+    fn new() -> Result<Self> {
         let root = tempfile::tempdir()?;
         let mut db = Database::open(root.path(), "test", inputs(""), (), retention())?;
         db.set_compression(ajika::Compression::None);
@@ -126,52 +133,92 @@ fn cache_recovery_keeps_identity_assignments() -> Result<()> {
             packed_value(cx, 42)?;
             file_id(cx, "saved.rs".into())
         })?;
-        let interner = db.interner();
-
         truncate_only_pack(root.path())?;
-
-        let pending = if recovery == "restart" {
-            drop(db);
-            db = Database::open(root.path(), "test", inputs(""), (), retention())?;
-            None
-        } else {
-            let pending = File::new(&interner, "pending.rs".into())?;
-            let mut calls = 0;
-            db.run(|cx| {
-                calls += 1;
-                packed_value(cx, 42)
-            })
-            .expect_err("the original request sees the damaged value");
-            assert_eq!(calls, 1);
-            assert!(db.recovery_pending());
-            #[cfg(unix)]
-            {
-                // Replace the file a restart will open while redb still holds the old one.
-                let index = root.path().join("index.redb");
-                std::fs::rename(&index, root.path().join("previous.redb"))?;
-                std::fs::File::create(index)?;
-            }
-            if recovery == "invalidate" {
-                db.invalidate()?;
-                assert!(!db.recovery_pending());
-                assert_eq!(pending.path(&db.interner())?, "pending.rs");
-                drop(db);
-                db = Database::open(root.path(), "test", inputs(""), (), retention())?;
-                assert_eq!(pending.path(&db.interner())?, "pending.rs");
-            }
-            Some(pending)
-        };
-        assert_eq!(db.run(|cx| packed_value(cx, 42))?.as_slice(), &[42; 4096]);
-        assert_eq!(db.statistics().executed, 1, "{recovery} rebuilt the value");
-        assert_eq!(saved.path(&db.interner())?, "saved.rs");
-        if let Some(pending) = pending {
-            assert_eq!(pending.path(&db.interner())?, "pending.rs");
-            assert_eq!(pending.path(&interner)?, "pending.rs");
-            drop(db);
-            let db = Database::open(root.path(), "test", inputs(""), (), retention())?;
-            assert_eq!(pending.path(&db.interner())?, "pending.rs");
-        }
+        Ok(Self { root, db, saved })
     }
+}
+
+#[cfg(unix)]
+fn replace_live_index(root: &std::path::Path) -> Result<()> {
+    // Replace the file a restart will open while redb still holds the old one.
+    let index = root.join("index.redb");
+    std::fs::rename(&index, root.join("previous.redb"))?;
+    std::fs::File::create(index)?;
+    Ok(())
+}
+
+#[test]
+fn restart_repairs_a_damaged_pack_and_keeps_saved_ids() -> Result<()> {
+    let DamagedCache { root, db, saved } = DamagedCache::new()?;
+    drop(db);
+
+    let mut db = Database::open(root.path(), "test", inputs(""), (), retention())?;
+    assert_eq!(saved.path(&db.interner())?, "saved.rs");
+    assert_eq!(db.run(|cx| packed_value(cx, 42))?.as_slice(), &[42; 4096]);
+    assert_eq!(db.statistics().executed, 1);
+    Ok(())
+}
+
+#[test]
+fn next_run_repairs_the_cache_and_preserves_live_ids() -> Result<()> {
+    let DamagedCache {
+        root,
+        mut db,
+        saved,
+    } = DamagedCache::new()?;
+    let interner = db.interner();
+    let pending = File::new(&interner, "pending.rs".into())?;
+    let mut calls = 0;
+    db.run(|cx| {
+        calls += 1;
+        packed_value(cx, 42)
+    })
+    .expect_err("the original request sees the damaged value");
+    assert_eq!(calls, 1);
+    assert!(db.recovery_pending());
+    #[cfg(unix)]
+    replace_live_index(root.path())?;
+
+    assert_eq!(db.run(|cx| packed_value(cx, 42))?.as_slice(), &[42; 4096]);
+    assert_eq!(db.statistics().executed, 1);
+    assert!(!db.recovery_pending());
+    assert_eq!(saved.path(&db.interner())?, "saved.rs");
+    assert_eq!(pending.path(&db.interner())?, "pending.rs");
+    assert_eq!(pending.path(&interner)?, "pending.rs");
+
+    drop(db);
+    let db = Database::open(root.path(), "test", inputs(""), (), retention())?;
+    assert_eq!(pending.path(&db.interner())?, "pending.rs");
+    Ok(())
+}
+
+#[test]
+fn invalidation_repairs_the_cache_and_persists_live_ids() -> Result<()> {
+    let DamagedCache {
+        root,
+        mut db,
+        saved,
+    } = DamagedCache::new()?;
+    let interner = db.interner();
+    let pending = File::new(&interner, "pending.rs".into())?;
+    db.run(|cx| packed_value(cx, 42))
+        .expect_err("the damaged value schedules repair");
+    assert!(db.recovery_pending());
+    #[cfg(unix)]
+    replace_live_index(root.path())?;
+
+    db.invalidate()?;
+    assert!(!db.recovery_pending());
+    assert_eq!(pending.path(&db.interner())?, "pending.rs");
+    assert_eq!(pending.path(&interner)?, "pending.rs");
+    drop(db);
+
+    // Reopen before any query checkpoint can save the pending assignment.
+    let mut db = Database::open(root.path(), "test", inputs(""), (), retention())?;
+    assert_eq!(pending.path(&db.interner())?, "pending.rs");
+    assert_eq!(saved.path(&db.interner())?, "saved.rs");
+    assert_eq!(db.run(|cx| packed_value(cx, 42))?.as_slice(), &[42; 4096]);
+    assert_eq!(db.statistics().executed, 1);
     Ok(())
 }
 
