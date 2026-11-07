@@ -132,7 +132,7 @@ impl Backend {
             .sum::<usize>()
             > MAX_INTERNER_BYTES
         {
-            database.invalidate(true)?;
+            database.rebuild(&[])?;
             return Ok(crate::Interner::default());
         }
         crate::Interner::load(assignments)
@@ -799,7 +799,7 @@ impl Backend {
             Store::Disk(database) if self.recovery.get().is_some() => {
                 self.interner.rebuild(database)
             }
-            Store::Disk(database) => match database.invalidate(false) {
+            Store::Disk(database) => match database.invalidate() {
                 Err(error) if error.kind() == ajika_storage::ErrorKind::InvalidCache => {
                     self.interner.rebuild(database)
                 }

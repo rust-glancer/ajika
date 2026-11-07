@@ -330,16 +330,15 @@ impl Database {
         Ok(self.index.as_ref().expect("healthy index"))
     }
 
-    /// Clear records and values together. If `reset_identities` is true, this also clears saved
-    /// identity assignments and invalidates any IDs that refer to them. Preserving identities
-    /// requires a recoverable identity table.
-    pub fn invalidate(&mut self, reset_identities: bool) -> Result<()> {
-        self.reset(reset_identities.then_some(&[]))
+    /// Clear records and values while preserving the saved identity table.
+    /// This requires a recoverable identity table.
+    pub fn invalidate(&mut self) -> Result<()> {
+        self.reset(None)
             .map_err(|error| error.require_reopen().at(&self.root))
     }
 
-    /// Discard query data and publish the caller's authoritative identity assignments together.
-    /// If the existing index is corrupt, replace it while keeping the directory lock.
+    /// Discard query data and replace the saved identity table. Pass an empty slice to clear
+    /// all assignments. If the index is corrupt, replace it while keeping the directory lock.
     pub fn rebuild(&mut self, identities: &[Identity<'_>]) -> Result<()> {
         self.reset(Some(identities))
             .map_err(|error| error.require_reopen().at(&self.root))

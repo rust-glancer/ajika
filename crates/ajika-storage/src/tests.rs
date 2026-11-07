@@ -110,7 +110,7 @@ fn removing_neighbors_keeps_live_frames_until_the_pack_is_empty() -> Result<()> 
     assert_eq!(database.snapshot()?.read_value(&[2; 32], 10_000)?, value);
     assert!(database.statistics()?.dead_pack_bytes >= 10_000);
 
-    database.invalidate(false)?;
+    database.invalidate()?;
     let stats = database.statistics()?;
     assert_eq!((stats.values, stats.pack_files), (0, 0));
     assert_eq!(
