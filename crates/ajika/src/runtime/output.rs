@@ -32,11 +32,13 @@ impl OutputSlot for &str {
         codec::encode(&(self.to_owned(), None::<Vec<u8>>))
     }
 }
+
 impl OutputSlot for String {
     fn encode(self) -> Result<Vec<u8>> {
         codec::encode(&(self, None::<Vec<u8>>))
     }
 }
+
 impl<K: Persist> OutputSlot for (&str, K) {
     fn encode(self) -> Result<Vec<u8>> {
         codec::encode(&(self.0.to_owned(), Some(codec::encode(&self.1)?)))
@@ -96,17 +98,21 @@ impl<T> Clone for Output<T> {
         }
     }
 }
+
 impl<T> PartialEq for Output<T> {
     fn eq(&self, other: &Self) -> bool {
         self.identity == other.identity
     }
 }
+
 impl<T> Eq for Output<T> {}
+
 impl<T> Hash for Output<T> {
     fn hash<H: Hasher>(&self, state: &mut H) {
         self.identity.hash(state);
     }
 }
+
 impl<T> fmt::Debug for Output<T> {
     fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
         self.identity.fmt(formatter)
@@ -117,10 +123,13 @@ impl<T> fmt::Debug for Output<T> {
 // any particular representation for the selector itself to round-trip.
 unsafe impl<T, C: wincode::config::Config> SchemaWrite<C> for Output<T> {
     type Src = Self;
+
     const TYPE_META: wincode::TypeMeta = wincode::TypeMeta::Dynamic;
+
     fn size_of(src: &Self) -> wincode::WriteResult<usize> {
         <Identity as SchemaWrite<C>>::size_of(&src.identity)
     }
+
     fn write(writer: impl wincode::io::Writer, src: &Self) -> wincode::WriteResult<()> {
         <Identity as SchemaWrite<C>>::write(writer, &src.identity)
     }
@@ -131,6 +140,7 @@ unsafe impl<T, C: wincode::config::Config> SchemaWrite<C> for Output<T> {
 unsafe impl<'de, T, C: wincode::config::Config> SchemaRead<'de, C> for Output<T> {
     type Dst = Self;
     const TYPE_META: wincode::TypeMeta = wincode::TypeMeta::Dynamic;
+
     fn read(
         reader: impl wincode::io::Reader<'de>,
         dst: &mut MaybeUninit<Self>,

@@ -6,7 +6,7 @@
 
 use std::sync::Arc;
 
-use ajika::{Db, Inputs, Lifetime, Result, Stamp};
+use ajika::{Db, Inputs, Lifetime, Stamp};
 
 #[derive(Clone)]
 pub(crate) struct Source {
@@ -15,7 +15,7 @@ pub(crate) struct Source {
 }
 
 impl Source {
-    fn stamp(&self) -> Result<Stamp> {
+    fn stamp(&self) -> ajika::Result<Stamp> {
         Ok(Stamp::of(self.text.as_bytes()))
     }
 
@@ -44,7 +44,7 @@ pub(crate) struct Syntax {
 }
 
 #[ajika::query(transient)]
-pub(crate) fn parse(db: &Db, file: u32) -> Result<Syntax> {
+pub(crate) fn parse(db: &Db, file: u32) -> ajika::Result<Syntax> {
     let source = File::at(file).source(db)?;
     let mut offset = 0;
     let mut names = Vec::new();
@@ -67,20 +67,20 @@ pub(crate) struct Analysis {
 }
 
 #[ajika::query]
-pub(crate) fn analyze(db: &Db, file: u32) -> Result<Analysis> {
+pub(crate) fn analyze(db: &Db, file: u32) -> ajika::Result<Analysis> {
     let syntax = parse(db, file)?;
     Analysis::new(db, syntax.names.clone(), syntax.locations.clone())
 }
 
 #[ajika::query]
-pub(crate) fn summary(db: &Db, file: u32) -> Result<u64> {
+pub(crate) fn summary(db: &Db, file: u32) -> ajika::Result<u64> {
     let names = analyze(db, file)?.names.value(db)?;
     let edition = configuration(db)?;
     Ok(names.iter().map(|name| name.len() as u64).sum::<u64>() + u64::from(*edition))
 }
 
 #[ajika::query]
-pub(crate) fn navigation(db: &Db, file: u32) -> Result<u64> {
+pub(crate) fn navigation(db: &Db, file: u32) -> ajika::Result<u64> {
     Ok(analyze(db, file)?
         .locations
         .value(db)?
@@ -90,12 +90,12 @@ pub(crate) fn navigation(db: &Db, file: u32) -> Result<u64> {
 }
 
 #[ajika::query]
-pub(crate) fn configuration(db: &Db) -> Result<u32> {
+pub(crate) fn configuration(db: &Db) -> ajika::Result<u32> {
     Project::at(()).edition(db)
 }
 
 #[ajika::query]
-pub(crate) fn index(db: &Db) -> Result<u64> {
+pub(crate) fn index(db: &Db) -> ajika::Result<u64> {
     let mut total = 0;
     for &file in Project::at(()).files(db)?.iter() {
         total += *summary(db, file)?;
@@ -106,7 +106,7 @@ pub(crate) fn index(db: &Db) -> Result<u64> {
 /// Repeated reads in one frame and distinct frames sharing the same child are different paths.
 /// This query covers the former; the index's summaries share configuration through the latter.
 #[ajika::query(transient)]
-pub(crate) fn repeated_reads(db: &Db, reads: u32) -> Result<u64> {
+pub(crate) fn repeated_reads(db: &Db, reads: u32) -> ajika::Result<u64> {
     let mut total = 0;
     for _ in 0..reads {
         total += *summary(db, 0)?;
@@ -119,7 +119,7 @@ pub(crate) fn repeated_reads(db: &Db, reads: u32) -> Result<u64> {
 pub(crate) fn payloads(
     db: &Db,
     bytes: u32,
-) -> Result<(ajika::Output<u64>, ajika::Output<Vec<u8>>)> {
+) -> ajika::Result<(ajika::Output<u64>, ajika::Output<Vec<u8>>)> {
     Ok((
         db.output("small", Arc::new(42))?,
         db.output("large", Arc::new(vec![7; bytes as usize]))?,

@@ -71,7 +71,7 @@ pub enum Lifetime {
 /// top-level calls. [`stored_queries`](Statistics::stored_queries) and
 /// [`stored_bytes`](Statistics::stored_bytes) describe storage after the operation.
 ///
-/// Payload I/O counts exclude metadata and redb page overhead. For example, an equal
+/// Payload I/O counts exclude metadata and index overhead. For example, an equal
 /// recomputation can write zero payload bytes while still replacing its saved dependency list.
 #[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
 pub struct Statistics {
@@ -86,9 +86,9 @@ pub struct Statistics {
     pub metadata_reads: u64,
     /// Disk output-header reads, shared by all callers of a producer within an operation.
     pub header_reads: u64,
-    /// Query-record rows written by checkpointing, including metadata-only updates.
+    /// Query records written by checkpointing, including metadata-only updates.
     pub metadata_writes: u64,
-    /// Encoded query-record bytes written by checkpointing; excludes index-page overhead.
+    /// Encoded query-record bytes written by checkpointing, excluding index overhead.
     pub metadata_bytes_written: u64,
     /// Values decoded from storage, including old values loaded for equality comparisons.
     pub decoded: u64,
@@ -109,7 +109,7 @@ pub struct Statistics {
     pub collected: u64,
     /// Complete cache records after the operation's optional collection.
     pub stored_queries: u64,
-    /// Logical encoded bytes, excluding redb page overhead and allocator capacity.
+    /// Logical encoded bytes, excluding index overhead and allocator capacity.
     /// The typed memory backend does not serialize values to produce this counter.
     pub stored_bytes: u64,
     /// Session records retained after the operation, separate from the durable cache.
@@ -144,8 +144,8 @@ pub enum Durability {
 /// backend continues to keep. The host chooses budgets appropriate to its workspace.
 #[derive(Debug, Clone, Copy)]
 pub struct Retention {
-    /// Encoded records and payloads on disk. The memory backend does not serialize its values
-    /// just to measure them, so it uses only the entry and age limits.
+    /// Encoded byte budget for retained records and payloads. Session results use an estimated
+    /// encoded size. Memory databases apply this limit only to session results.
     pub max_bytes: u64,
     /// Number of stored query calls. A query's return value and named outputs count as one entry.
     pub max_entries: usize,
@@ -169,11 +169,14 @@ pub struct Retention {
 pub trait Query: 'static {
     /// Untracked host facilities, such as progress reporting. Semantic values live in [`Inputs`](crate::Inputs).
     type Services: Send + Sync + 'static;
+
     /// Arguments identifying the same logical question across edits, such as a file path.
     /// Avoid including the whole input revision: that creates a different call after every
     /// edit, preventing Ajika from finding the previous answer to validate and compare.
     type Key: Persist + Clone + Eq + Hash + Send + Sync + 'static;
+
     type Value: Send + Sync + 'static;
+
     /// Stable replay name, unique among query implementations for this database's
     /// [`Services`](Query::Services) type. Together with the key, this identifies the same computation
     /// across revisions and restarts.

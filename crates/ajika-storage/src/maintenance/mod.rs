@@ -14,12 +14,12 @@ use std::{
     time::Instant,
 };
 
-use anyhow::Result;
 use redb::ReadableTable;
 
 use crate::{
-    Database, Write,
-    format::{FrameHeader, Location, PACKS, PackHeader, PackInfo, VALUES},
+    Database, Error, Result, Write,
+    error::ensure,
+    format::{self, FrameHeader, Location, PACKS, PackHeader, PackInfo, VALUES},
     pack::PackWriter,
 };
 
@@ -29,9 +29,8 @@ const SMALL_PACK_BYTES: u64 = PASS_BYTES / 4;
 const SMALL_PACK_COUNT: usize = 8;
 
 impl Database {
-    /// Perform one small maintenance pass between query operations. Ordinary writes mark work
-    /// pending; a read-only operation usually needs only this flag check. A pass bounds scanned
-    /// bytes and frames, but finishes an individual frame even if that frame exceeds the budget.
+    /// Run one small reclamation pass between operations if needed. A single large value can
+    /// make the pass exceed its usual work budget.
     pub fn maintain(&self) -> Result<()> {
         if self.maintenance_due.swap(false, Ordering::Relaxed) {
             self.compact_step(false)?;
@@ -48,10 +47,7 @@ impl Database {
             .iter()?
             .map(|row| {
                 let (id, bytes) = row?;
-                Ok((
-                    *id.value(),
-                    wincode::deserialize_exact::<PackInfo>(bytes.value())?,
-                ))
+                Ok((*id.value(), format::decode::<PackInfo>(bytes.value())?))
             })
             .collect::<Result<Vec<_>>>()?;
 
@@ -123,17 +119,20 @@ impl Database {
             while offset < info.length && scanned < PASS_BYTES && frames < PASS_FRAMES {
                 let mut bytes = [0; FrameHeader::LENGTH as usize];
                 source.read_exact(&mut bytes)?;
-                let header: FrameHeader = wincode::deserialize_exact(&bytes)?;
+                let header: FrameHeader = format::decode(&bytes)?;
                 let end = offset
                     .checked_add(FrameHeader::LENGTH)
                     .and_then(|start| start.checked_add(header.stored_length))
-                    .ok_or_else(|| anyhow::anyhow!("invalid pack frame range"))?;
-                anyhow::ensure!(end <= info.length, "invalid pack frame range");
+                    .ok_or_else(|| Error::invalid_cache("invalid pack frame range"))?;
+                ensure!(
+                    end <= info.length,
+                    Error::invalid_cache("invalid pack frame range"),
+                );
                 let live = {
                     let table = write.transaction.open_table(VALUES)?;
                     let location = table
                         .get(&header.id)?
-                        .map(|bytes| wincode::deserialize_exact::<Location>(bytes.value()))
+                        .map(|bytes| format::decode::<Location>(bytes.value()))
                         .transpose()?;
                     match location {
                         Some(Location::Pack {
@@ -141,7 +140,10 @@ impl Database {
                             offset: at,
                             header: expected,
                         }) if pack == id && at == offset => {
-                            anyhow::ensure!(header == expected, "invalid stored frame header");
+                            ensure!(
+                                header == expected,
+                                Error::invalid_cache("invalid stored frame header"),
+                            );
                             true
                         }
                         _ => false,
@@ -165,9 +167,9 @@ impl Database {
             remaining.scan_offset = offset;
             // A damaged dead-frame length could skip a live frame. Never retire such a file:
             // its inventory must agree that all live locations have actually moved.
-            anyhow::ensure!(
+            ensure!(
                 offset < info.length || remaining.live_values == 0,
-                "pack inventory contains unreachable frames"
+                Error::invalid_cache("pack inventory contains unreachable frames"),
             );
             if remaining.live_values == 0 {
                 retired += 1;

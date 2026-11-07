@@ -13,16 +13,13 @@ use std::{
     thread,
 };
 
-use super::{
-    Db,
-    coordination::{Coordination, Failure},
-    frame::Frame,
-};
-use crate::Result;
+use super::{Db, coordination::Coordination, frame::Frame};
+use crate::{Error, Result};
 
 /// One extra thread taken from the operation's shared worker budget. Returning it on drop lets
 /// later nested batches use that capacity, including when the worker exits by unwinding.
 struct Permit<'a>(&'a AtomicUsize);
+
 impl Drop for Permit<'_> {
     fn drop(&mut self) {
         self.0.fetch_add(1, Ordering::Release);
@@ -32,14 +29,14 @@ impl Drop for Permit<'_> {
 /// A callback-lifetime guard that tells other workers to stop if this worker panics.
 /// Its scope includes application code between query calls, where no query claim is active.
 struct Worker<'a>(&'a Coordination);
+
 impl Drop for Worker<'_> {
     fn drop(&mut self) {
         if thread::panicking() {
             // A callback can panic between query calls, with no claim guard on its
             // stack. Signal other workers before the thread scope starts joining them.
-            self.0.fail(Failure::new(anyhow::anyhow!(
-                "parallel query callback panicked"
-            )));
+            self.0
+                .fail(Error::invariant("parallel query callback panicked"));
         }
     }
 }
@@ -49,14 +46,11 @@ impl<S: Send + Sync + 'static> Db<'_, S> {
     /// Each callback receives a [`Db`] for the same operation, so nested queries share answers as
     /// usual. Return values stay in input order even when callbacks finish in a different order.
     ///
-    /// Callbacks are parts of the calling query, not new query declarations. Their input and
-    /// child-query reads are gathered separately, then added to that query's dependency list in
-    /// input order. All workers finish before this returns, including on an error.
+    /// Input and child-query reads in callbacks are dependencies of the calling query.
+    /// All workers finish before this returns, including on an error.
     ///
-    /// The caller participates in the work. Extra scoped threads share the database's worker
-    /// budget across nested batches; without a spare thread, a batch runs locally. Use this for
-    /// coarse work: ordinary nested query calls stay synchronous. Arbitrary work-stealing pools
-    /// can suspend a query's owner underneath another task waiting for that same query.
+    /// Use this for coarse work. The calling thread participates, and nested batches share the
+    /// limit configured by [`Database::set_parallelism`](crate::Database::set_parallelism).
     pub fn parallel_map<T: Sync, R: Send>(
         &self,
         items: &[T],

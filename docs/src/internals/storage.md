@@ -97,7 +97,7 @@ once started. That bounds work, not exact latency. `compact()` finishes reclamat
 and shrinks the index without the normal pass budget.
 
 Physical headroom is separate from query retention. At storage capacity, a
-`StorageFull` error refuses new payloads while allowing reads, removals, and
+`Capacity` error refuses new payloads while allowing reads, removals, and
 maintenance. Reclamation cannot make a live dataset smaller; the host may need
 to evict work or change its storage allocation.
 

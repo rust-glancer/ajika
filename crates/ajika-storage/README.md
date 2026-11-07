@@ -82,7 +82,7 @@ too. Dense or large live packs need not be merged into a single file.
 `Options::max_physical_bytes` defaults to 32 GiB. It is a soft physical budget, separate from
 Ajika's logical retention policy. Normal writes reserve headroom for maintenance; index growth
 within a checkpoint and copying oversized values can exceed the limit. At capacity, new payloads
-return `StorageFull`, while reads, removals, and maintenance remain available. Space reclamation
+return an error classified as `ajika_storage::ErrorKind::Capacity`, while reads, removals, and maintenance remain available. Space reclamation
 cannot help if the live working set itself exceeds the budget: callers must discard cached work
 or allow more space. There is no automatic eviction or rebuild loop in this crate.
 

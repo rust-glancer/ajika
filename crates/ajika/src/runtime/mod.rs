@@ -18,7 +18,7 @@ use std::{
     time::{Duration, Instant},
 };
 
-use crate::{Result, Retention, Statistics};
+use crate::{Error, Result, Retention, Statistics};
 
 mod backend;
 mod cache;
@@ -35,13 +35,12 @@ pub(crate) mod value;
 use self::{
     backend::Backend,
     cache::{Memo, Memos},
-    coordination::Failure,
     frame::Frame,
     record::Id,
     registry::Registry,
 };
 pub use self::{
-    coordination::{Cancellation, Cancelled, QueryCall, QueryCycle},
+    coordination::{Cancellation, QueryCall, QueryCycle},
     output::{Output, OutputSlot},
 };
 
@@ -143,8 +142,8 @@ impl<S: Send + Sync + 'static> Database<S> {
         self.backend.set_compression(compression);
     }
 
-    /// Inspect physical storage without decoding query values. This scans index rows, so use
-    /// it for diagnostics rather than for every request. Memory storage has no disk statistics.
+    /// Inspect physical storage without decoding query values. This scans storage metadata,
+    /// so use it for diagnostics. Returns `None` for memory storage.
     pub fn storage_statistics(&self) -> Result<Option<crate::StorageStatistics>> {
         self.backend.storage_statistics()
     }
@@ -224,17 +223,20 @@ impl<S: Send + Sync + 'static> Database<S> {
     ///
     /// The callback receives a [`Db`] for the current captured inputs. Query answers become usable
     /// by other queries as soon as they are computed. Once the callback and its scoped workers
-    /// finish successfully, a checkpoint saves the operation's changes together. Ajika then
-    /// releases its working memos, including decoded values and dependency records. The backend
-    /// retains only a small validity proof alongside each completed record's retention metadata.
+    /// finish successfully, a checkpoint saves the operation's changes together. Ajika releases
+    /// the operation's working state when the run ends.
     ///
     /// Failure before checkpointing discards pending work, including successful child queries.
     /// The host should reject inconsistent captured inputs before returning from the callback.
-    /// Saving cache data and accepting application state remain separate: cancellation or a
-    /// maintenance error after commit can make this return an error even though data was saved.
+    /// A cancellation or maintenance error after commit can make this return an error even
+    /// though the cache was saved.
     ///
-    /// Returned [`Arc`]s remain usable and keep their allocations alive. They are ordinary
-    /// immutable answers, not a way to issue more queries against a historical input revision.
+    /// The callback uses the same [`Result`] as query providers. A recorded query failure takes
+    /// precedence over cancellation, including cancellation returned directly by the callback.
+    /// Other callback errors retain their context and application-specific cause. Use
+    /// [`Error::is_cancelled`] when deciding whether to publish the answer.
+    ///
+    /// Returned [`Arc`]s keep their answers alive after the run, including across input changes.
     pub fn run<R>(&mut self, work: impl FnOnce(&Db<'_, S>) -> Result<R>) -> Result<R> {
         let _span = tracing::debug_span!("ajika.operation", revision = self.revision).entered();
         // Reset cancellation after a panic too, so a host that catches it can start another
@@ -246,11 +248,21 @@ impl<S: Send + Sync + 'static> Database<S> {
                 operation: &operation,
                 frame: &frame,
             };
-            let result: Result<R> = (|| {
+            let result = (|| {
                 db.check_cancelled()?;
                 // Providers can publish completed values to each other in memory. Nothing is
                 // written to disk until the host callback and all its scoped work have finished.
-                let value = work(&db)?;
+                let callback_result = work(&db);
+                // Cancellation means an answer is no longer needed, but must not conceal a
+                // failure that a provider already recorded. Preserve real callback errors so
+                // application-specific causes and any added context survive this boundary.
+                if callback_result.as_ref().is_err_and(Error::is_cancelled)
+                    && let Err(recorded) = self.cancellation.inner.check()
+                    && !recorded.is_cancelled()
+                {
+                    return Err(recorded);
+                }
+                let value = callback_result?;
                 db.check_cancelled()?;
                 self.cancellation.inner.assert_drained();
                 let memos = operation
@@ -299,11 +311,7 @@ impl<S: Send + Sync + 'static> Database<S> {
                 // Relocation needs neither query execution nor the released working values.
                 // A capacity refusal still permits this pass, so reclamation can make progress
                 // without poisoning otherwise readable cached results.
-                if result.is_ok()
-                    || result
-                        .as_ref()
-                        .is_err_and(|error| error.is::<crate::StorageFull>())
-                {
+                if result.is_ok() || result.as_ref().is_err_and(Error::is_capacity) {
                     self.backend.maintain()?;
                 }
                 (
@@ -321,14 +329,12 @@ impl<S: Send + Sync + 'static> Database<S> {
         }
     }
 
-    /// Apply retention limits to previously stored work and release unnecessary resident metadata.
-    /// Each removed query loses its record and all output payloads. A later request can compute it
-    /// again, including through a saved parent's dependency, because the dependency includes its key.
-    /// Return the number of stored query records removed.
+    /// Apply retention limits to stored and session results. A later request can recompute an
+    /// evicted query and its outputs, including when needed by a retained query. Returns the
+    /// number of query records removed.
     ///
     /// Successful runs already collect periodically or when over budget. The host can request
-    /// this pass at another idle boundary too. Query working state has already been released
-    /// with its operation; collection also relocates identity keys.
+    /// this pass at another idle boundary too. Interned IDs remain valid.
     pub fn collect(&mut self) -> Result<usize> {
         let mut removed = self.backend.collect(self.retention)?;
         removed += self.backend.collect_session(self.session_retention);
@@ -421,16 +427,10 @@ impl<S: Send + Sync + 'static> Drop for Operation<'_, S> {
     }
 }
 
-/// The query function's access to inputs, other queries, and the active operation.
+/// Access to inputs and query answers during an operation.
 ///
-/// A function using this handle does not choose between computing and loading its children.
-/// It asks for their answers through ordinary calls. The runtime serves those calls and records
-/// the answers used in this function's frame, which is how the function acquires dependencies
-/// without manually building a read list.
-///
-/// Child query executions receive their own [`Db`] and frame while sharing the same operation.
-/// The host callback has a frame with no owner: there is no parent query whose dependencies need
-/// recording. In every case, the operation's captured inputs stay fixed until it returns.
+/// The host callback and its queries use the same captured inputs for the run. Ajika loads or
+/// computes answers as needed, and reads made inside a query automatically become its dependencies.
 pub struct Db<'operation, S: Send + Sync + 'static = ()> {
     operation: &'operation Operation<'operation, S>,
     frame: &'operation Frame,
@@ -459,21 +459,18 @@ impl<S: Send + Sync + 'static> Db<'_, S> {
         self.operation.database.cancellation.inner.check()
     }
 
-    /// Run a database action and remember any error as a failure of the whole operation.
-    /// Returning the error to this caller alone is insufficient: it might be caught while
-    /// other workers keep going. The operation must still stop and avoid saving partial work.
-    /// Expected language errors should therefore be ordinary query values, not runtime errors.
+    /// Share the reason work stopped before returning it to the caller. When a provider catches
+    /// a child error, the coordinator still stops the operation and prevents a checkpoint.
+    /// For example, return syntax diagnostics as part of the answer if partial analysis is useful.
     fn handle<T>(&self, work: impl FnOnce() -> Result<T>) -> Result<T> {
         work().map_err(|error| {
-            let failure = Failure::new(error);
-            let cancellation = &self.operation.database.cancellation;
-            cancellation.inner.fail(failure.clone());
-            // Hosts distinguish an expected cancellation from a storage/provider
-            // failure. Keep that public error directly downcastable for waiters too.
-            if cancellation.is_cancelled() {
-                Cancelled.into()
+            let coordination = &self.operation.database.cancellation.inner;
+            coordination.fail(error.clone());
+            // A worker that only observes cancellation must not hide another worker's cause.
+            if error.is_cancelled() {
+                coordination.check().expect_err("operation has stopped")
             } else {
-                failure.into()
+                error
             }
         })
     }

@@ -78,19 +78,40 @@ candidate before checkpointing.
 
 No fixed-point recovery is provided for query cycles. Ajika returns a
 `QueryCycle` containing a closed chain of calls, including cross-worker cycles.
-Application error context is preserved:
+Diagnostic context preserves the typed cycle:
 
 ```rust
 # extern crate ajika;
-# extern crate anyhow;
-fn report_cycle(error: &anyhow::Error) {
-    if let Some(cycle) = error.chain()
-        .find_map(|cause| cause.downcast_ref::<ajika::QueryCycle>())
-    {
+use ajika::{Error, ErrorKind};
+
+fn report_cycle(error: &Error) {
+    if let ErrorKind::Cycle(cycle) = error.kind() {
         eprintln!("{cycle}");
     }
 }
 ```
+
+Queries and `Database::run` use the same `ajika::Result<T>`, a standard
+`Result<T, ajika::Error>`. `Error::is_cancelled()` identifies an expected stop.
+`Error::kind()` exposes cancellation, cycle, unavailable-data, persistence,
+application, contract, and unexpected-failure categories. Precise causes remain
+available through `std::error::Error::source`.
+
+Use `Error::application(source)` to preserve a host-specific failure from a
+provider. This extension point is explicit: an existing Ajika error should be
+propagated with `?`, so it keeps its classification. `ResultExt::context` adds
+reporting context without changing a failure's kind or a cancellation checkpoint.
+`Display` prints the current summary; an application reporter such as `anyhow`
+can include the full source chain. A `run` callback uses ordinary `?` and
+`Ok(...)` without an error-type annotation. It can reject a candidate with
+`Err(Error::application(source))`. This accepts concrete errors, boxed standard
+errors, and `anyhow::Error` reports. Concrete errors remain downcastable through
+`ErrorKind::Application`. An `anyhow` report's standard boxed conversion preserves
+its diagnostic chain but may erase typed downcasts; pass the concrete error when
+the host needs typed recovery.
+
+Classify provider-side parsing and serialization with
+`.map_err(Error::application)?`. Ajika classifies its own codec failures internally.
 
 Recursive domain algorithms can still live inside a query. A recursive call to
 another key is also fine when it terminates; a call graph that returns to an
@@ -102,11 +123,35 @@ Obtain a `Cancellation` handle from `database.cancellation()` before starting
 work. Another thread can call `cancel()`. Query boundaries and parallel workers
 check it, and long local loops should call `db.check_cancelled()?` themselves.
 
+Handle cancellation once at the request's publication boundary. Other helpers
+propagate it with ordinary `?`:
+
+```rust
+# extern crate ajika;
+# fn publish<T>(_: T) {}
+fn finish<T>(result: ajika::Result<T>) -> ajika::Result<()> {
+    match result {
+        Ok(value) => publish(value),
+        Err(error) if error.is_cancelled() => {},
+        Err(error) => return Err(error),
+    }
+    Ok(())
+}
+```
+
+A recorded worker failure takes precedence over cancellation, even if the `run`
+callback catches that failure and returns cancellation. `Cancelled::at` lets an
+external cancellation system retain a named checkpoint when adapting its signal
+with `Err(ajika::Cancelled::at("request superseded").into())`. The checkpoint is
+available through `ErrorKind::Cancelled`.
+
 Cancellation does not forcibly interrupt arbitrary Rust code or an I/O syscall.
 The owner issues a fresh token after the operation or input replacement; retain
 the token for the work you mean to cancel, not for all future operations.
 
 A failed operation releases its working set and claims. A cache checkpoint may
 already have committed before a late cancellation or maintenance error, so the
-host still decides whether to publish the response. See the
+host still decides whether to publish the response. `Error::requires_reopen()`
+reports whether the failed operation left the database unusable; a capacity
+refusal permits reads and reclamation without reopening. See the
 [operation implementation](https://github.com/rust-glancer/ajika/blob/main/crates/ajika/src/runtime/mod.rs#L238) for the exact boundary.

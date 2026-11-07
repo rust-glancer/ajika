@@ -15,7 +15,9 @@ use super::{
     record::{Address, Dependency, Record, RecordHeader, Slot, ValueRecord},
     value::{Codec, Value},
 };
-use crate::{Durability, Input, Lifetime, Persist, Query, Result};
+use crate::{
+    Durability, Error, Input, Lifetime, Persist, Query, Result, UnavailableData, error::ensure,
+};
 
 impl<S: Send + Sync + 'static> Db<'_, S> {
     /// Ask query Q for the answer to `key` under this operation's captured inputs.
@@ -62,8 +64,8 @@ impl<S: Send + Sync + 'static> Db<'_, S> {
         })
     }
 
-    /// Read one typed input field and record its fingerprint in the calling query. The value is
-    /// acquired once per snapshot; a read never replaces an already captured observation.
+    /// Read one typed input field and record a dependency when called from a query.
+    /// Reads within a snapshot reuse the captured value for that field and key.
     pub fn input<T: Input>(&self, key: T::Key) -> Result<T::Value> {
         self.handle(|| {
             self.check_cancelled()?;
@@ -98,16 +100,16 @@ impl<S: Send + Sync + 'static> Db<'_, S> {
             let producer = frame
                 .owner
                 .clone()
-                .ok_or_else(|| anyhow::anyhow!("outputs require an executing query"))?;
+                .ok_or_else(|| Error::contract("outputs require an executing query"))?;
             let slot = slot.encode()?;
             let value = Value {
                 data: value,
                 codec: Some(Codec::of::<T>()),
             };
             let mut reads = frame.reads.lock().expect("query outputs");
-            anyhow::ensure!(
+            ensure!(
                 reads.outputs.insert(Some(slot.clone()), value).is_none(),
-                "query emitted an output slot twice"
+                Error::contract("query emitted an output slot twice"),
             );
             Ok(Output::new(producer, slot))
         })
@@ -124,9 +126,9 @@ impl<S: Send + Sync + 'static> Db<'_, S> {
     ) -> Result<Arc<T>> {
         self.handle(|| {
             self.check_cancelled()?;
-            anyhow::ensure!(
+            ensure!(
                 self.frame.owner.as_ref() != Some(address),
-                "query cannot read its own output while executing"
+                Error::contract("query cannot read its own output while executing"),
             );
             if let Some(value) = self.frame.acquired(address, slot)? {
                 if tracing::enabled!(target: diagnostics::TARGET, tracing::Level::TRACE) {
@@ -139,9 +141,13 @@ impl<S: Send + Sync + 'static> Db<'_, S> {
                 return Ok(value);
             }
             let registry = &self.operation.database.registry;
-            let memo = registry
-                .replay(self, address, false)?
-                .ok_or_else(|| anyhow::anyhow!("unknown output producer: {}", address.family))?;
+            let memo =
+                registry
+                    .replay(self, address, false)?
+                    .ok_or_else(|| UnavailableData::Output {
+                        producer: address.family.clone(),
+                        slot: slot.to_vec(),
+                    })?;
             let slot = Some(slot.to_vec());
             let mut value = self.materialize_output::<T>(&memo, &slot)?;
             if value.is_none() {
@@ -150,8 +156,10 @@ impl<S: Send + Sync + 'static> Db<'_, S> {
                 registry.replay(self, address, true)?;
                 value = self.materialize_output::<T>(&memo, &slot)?;
             }
-            let value =
-                value.ok_or_else(|| anyhow::anyhow!("producer did not materialize its output"))?;
+            let value = value.ok_or_else(|| UnavailableData::Output {
+                producer: address.family.clone(),
+                slot: slot.clone().unwrap_or_default(),
+            })?;
             let state = memo.lock();
             let header = state.header.as_ref().expect("output producer is verified");
             self.frame.depend(
@@ -176,21 +184,23 @@ impl<S: Send + Sync + 'static> Db<'_, S> {
         slot: &Slot,
     ) -> Result<Option<Arc<T>>> {
         if let Some(value) = memo.lock().values.get(slot) {
-            return value.typed().map(Some);
+            return Ok(Some(value.typed()?));
         }
         self.claimed(memo, || {
             let header = {
                 let state = memo.lock();
                 if let Some(value) = state.values.get(slot) {
-                    return value.typed().map(Some);
+                    return Ok(Some(value.typed()?));
                 }
                 state.header.clone().expect("output producer is verified")
             };
-            anyhow::ensure!(
-                header.values.contains_key(slot),
-                "output is no longer emitted by {}",
-                memo.address.family
-            );
+            if !header.values.contains_key(slot) {
+                return Err(UnavailableData::Output {
+                    producer: memo.address.family.clone(),
+                    slot: slot.clone().unwrap_or_default(),
+                }
+                .into());
+            }
             let Some(value) = self.load(&memo.address, &header, slot, Codec::of::<T>(), false)?
             else {
                 return Ok(None);

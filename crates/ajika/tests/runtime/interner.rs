@@ -1,5 +1,6 @@
 use ajika as renamed;
-use ajika::{Database, Result};
+use ajika::Database;
+use anyhow::Result;
 
 use super::{Db, inputs, retention};
 
@@ -9,7 +10,7 @@ struct File {
 }
 
 #[ajika::query]
-fn file_id(cx: &Db, path: String) -> Result<File> {
+fn file_id(cx: &Db, path: String) -> ajika::Result<File> {
     File::new(&cx.interner(), path)
 }
 

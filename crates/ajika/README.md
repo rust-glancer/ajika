@@ -36,7 +36,7 @@ fn word_count(db: &Db<'_>, path: String) -> Result<usize> {
     Ok(words(db, path)?.len())
 }
 
-# fn main() -> Result<()> {
+# fn main() -> anyhow::Result<()> {
 let limits = Retention {
     max_entries: 10_000,
     max_bytes: 256 * 1024 * 1024,
@@ -80,6 +80,7 @@ walks through opening and reopening a cache.
 | Publish separately readable outputs | [`output`](macro@output), [`Output`] |
 | Intern immutable values | [`interned`](macro@interned), [`Interner`] |
 | Run parallel work or handle cancellation | [`Db::parallel_map`], [`Cancellation`], [`QueryCycle`] |
+| Handle query failures and cancellation | [`Error`], [`ErrorKind`], [`ResultExt`] |
 | Inspect and maintain the cache | [`Statistics`], [`Database::collect`], [`Database::compact`] |
 
 For guidance on query boundaries and reuse, see the book's

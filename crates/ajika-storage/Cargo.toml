@@ -8,7 +8,7 @@ repository.workspace = true
 description = "Atomic records and packed immutable values for Ajika."
 
 [dependencies]
-anyhow.workspace = true
+thiserror.workspace = true
 blake3.workspace = true
 getrandom.workspace = true
 lz4_flex = { workspace = true, features = ["std", "frame"] }
@@ -18,6 +18,7 @@ wincode = { workspace = true, features = ["derive"] }
 zstd.workspace = true
 
 [dev-dependencies]
+anyhow.workspace = true
 divan.workspace = true
 tempfile.workspace = true
 

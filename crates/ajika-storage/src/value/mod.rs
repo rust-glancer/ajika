@@ -6,27 +6,28 @@
 
 use std::io::{Read, Write};
 
-use anyhow::Result;
 use wincode::{SchemaRead, SchemaWrite};
+
+use crate::{Error, Result, error::ensure};
 
 pub(crate) const INLINE_BYTES: usize = 1024;
 
-/// The space/CPU choice for new values. Readers use the codec saved with each value.
+/// The space and CPU trade-off for new values. Choosing a different option for an
+/// existing database keeps the existing values readable.
 #[derive(Debug, Default, Clone, Copy, PartialEq, Eq, SchemaRead, SchemaWrite)]
 pub enum Compression {
     /// Store the caller's bytes directly.
     None,
-    /// LZ4 frames: prioritize inexpensive encoding and decoding.
+    /// LZ4 frames prioritize inexpensive encoding and decoding.
     #[default]
     Lz4,
-    /// Zstd frames at level three: spend more encoding work on smaller storage.
+    /// Zstd frames prioritize smaller stored values.
     Zstd,
 }
 
 impl Compression {
-    /// Compress one already serialized value. Tiny values remain raw and inline in the index.
-    /// Also keep the original if compression saves less than one eighth: a marginal reduction
-    /// should not impose a decompressor on every future load.
+    /// Prepare one serialized value for storage. Small values and values that compress poorly
+    /// can be stored as-is.
     pub fn encode(self, bytes: Vec<u8>) -> Result<EncodedValue> {
         let raw_length = bytes.len() as u64;
         let mut compression = Self::None;
@@ -41,6 +42,7 @@ impl Compression {
                 }
                 Self::Zstd => zstd::stream::encode_all(encoded.as_slice(), 3)?,
             };
+            // Require meaningful savings before adding decompression work to every future read.
             if compressed.len() < encoded.len() - encoded.len() / 8 {
                 encoded = compressed;
                 compression = self;
@@ -58,36 +60,42 @@ impl Compression {
     /// The stored checksum is checked by the reader before it reaches this function.
     pub(crate) fn decode(self, bytes: Vec<u8>, raw_length: u64) -> Result<Vec<u8>> {
         if self == Self::None {
-            anyhow::ensure!(bytes.len() as u64 == raw_length, "invalid raw value length");
+            ensure!(
+                bytes.len() as u64 == raw_length,
+                Error::invalid_cache("invalid raw value length"),
+            );
             return Ok(bytes);
         }
-        let mut result = Vec::with_capacity(usize::try_from(raw_length)?);
+        let mut result =
+            Vec::with_capacity(usize::try_from(raw_length).map_err(Error::invalid_source)?);
         let limit = raw_length
             .checked_add(1)
-            .ok_or_else(|| anyhow::anyhow!("invalid value length"))?;
+            .ok_or_else(|| Error::invalid_cache("invalid value length"))?;
         match self {
             Self::None => unreachable!(),
             Self::Lz4 => {
                 lz4_flex::frame::FrameDecoder::new(bytes.as_slice())
                     .take(limit)
-                    .read_to_end(&mut result)?;
+                    .read_to_end(&mut result)
+                    .map_err(Error::invalid_source)?;
             }
             Self::Zstd => {
-                zstd::stream::Decoder::new(bytes.as_slice())?
+                zstd::stream::Decoder::new(bytes.as_slice())
+                    .map_err(Error::invalid_source)?
                     .take(limit)
-                    .read_to_end(&mut result)?;
+                    .read_to_end(&mut result)
+                    .map_err(Error::invalid_source)?;
             }
         }
-        anyhow::ensure!(
+        ensure!(
             result.len() as u64 == raw_length,
-            "invalid decoded value length"
+            Error::invalid_cache("invalid decoded value length"),
         );
         Ok(result)
     }
 }
 
-/// An owned value ready to append. Its checksum covers the stored bytes, before decompression.
-/// Keeping this separate from a transaction lets a caller prepare a bounded batch in parallel.
+/// An owned value ready to write. Callers can prepare a batch in parallel before opening a write.
 pub struct EncodedValue {
     pub(crate) raw_length: u64,
     pub(crate) compression: Compression,

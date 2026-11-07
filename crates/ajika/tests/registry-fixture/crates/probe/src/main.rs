@@ -1,9 +1,9 @@
 use std::{env, sync::Arc, time::Duration};
 
-use ajika::{__private::Registration, Database, Result, Retention};
+use ajika::{__private::Registration, Database, Retention};
 use fixture_queries::{File, FileId};
 
-fn main() -> Result<()> {
+fn main() -> std::result::Result<(), Box<dyn std::error::Error>> {
     let args: Vec<_> = env::args_os().collect();
     let step: usize = args[1].to_str().expect("numeric step").parse()?;
     let (source, expected, executed) = [

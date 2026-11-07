@@ -9,12 +9,11 @@ use std::{
     path::Path,
 };
 
-use anyhow::Result;
 use redb::{ReadableDatabase, ReadableTable};
 
 use crate::{
-    Database, DatabaseInUse,
-    format::{IDENTITIES, Location, PACKS, PackHeader, PackInfo, RECORDS, VALUES},
+    Database, Error, Result,
+    format::{self, IDENTITIES, Location, PACKS, PackHeader, PackInfo, RECORDS, VALUES},
 };
 
 /// Logical contents and filesystem usage at the same observation boundary.
@@ -45,7 +44,7 @@ impl Statistics {
     pub fn inspect(path: &Path) -> Result<Self> {
         let owner = File::open(path.join("owner.lock"))?;
         owner.try_lock_shared().map_err(|error| match error {
-            fs::TryLockError::WouldBlock => anyhow::Error::from(DatabaseInUse),
+            fs::TryLockError::WouldBlock => Error::in_use(),
             fs::TryLockError::Error(error) => error.into(),
         })?;
         let index = redb::Database::builder()
@@ -69,7 +68,7 @@ impl Statistics {
             let (_, value) = entry?;
             stats.values += 1;
             stats.location_bytes += value.value().len() as u64;
-            let raw_length = match wincode::deserialize_exact::<Location>(value.value())? {
+            let raw_length = match format::decode::<Location>(value.value())? {
                 Location::Inline(bytes) => {
                     stats.inline_bytes += bytes.len() as u64;
                     stats.inline_values += 1;
@@ -88,7 +87,7 @@ impl Statistics {
         }
         for entry in read.open_table(PACKS)?.iter()? {
             let (_, value) = entry?;
-            let info: PackInfo = wincode::deserialize_exact(value.value())?;
+            let info: PackInfo = format::decode(value.value())?;
             stats.dead_pack_bytes += info.length - PackHeader::LENGTH - info.live_bytes;
         }
         let index = fs::metadata(path.join("index.redb"))?;

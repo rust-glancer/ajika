@@ -19,6 +19,7 @@ its value is the captured text. A query computes an answer from inputs or other 
 
 ```rust
 # extern crate ajika;
+# extern crate anyhow;
 {{#rustdoc_include ../../../examples/word-count/src/main.rs:queries}}
 ```
 
@@ -44,6 +45,7 @@ an **operation**: a scope in which query calls can share computed and loaded val
 
 ```rust
 # extern crate ajika;
+# extern crate anyhow;
 {{#rustdoc_include ../../../examples/word-count/src/main.rs:run}}
 ```
 
@@ -64,6 +66,7 @@ First ask the same question again, then widen the gap to four spaces:
 
 ```rust
 # extern crate ajika;
+# extern crate anyhow;
 {{#rustdoc_include ../../../examples/word-count/src/main.rs:unchanged}}
 ```
 
@@ -79,6 +82,7 @@ Now insert a word:
 
 ```rust
 # extern crate ajika;
+# extern crate anyhow;
 {{#rustdoc_include ../../../examples/word-count/src/main.rs:changed}}
 ```
 

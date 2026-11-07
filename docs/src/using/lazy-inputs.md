@@ -13,7 +13,7 @@ The initializer receives the input key:
 use ajika::Result;
 
 fn acquire_text(path: &String) -> Result<String> {
-    Ok(std::fs::read_to_string(path)?)
+    std::fs::read_to_string(path).map_err(ajika::Error::application)
 }
 
 #[ajika::input(key = String)]
@@ -44,7 +44,7 @@ newly captured text in an input batch or forget the old capture:
 # extern crate ajika;
 # use ajika::{Database, Result};
 # fn acquire_text(path: &String) -> Result<String> {
-#     Ok(std::fs::read_to_string(path)?)
+#     std::fs::read_to_string(path).map_err(ajika::Error::application)
 # }
 # #[ajika::input(key = String)]
 # struct File { #[input(arc, initialize = acquire_text)] text: String }

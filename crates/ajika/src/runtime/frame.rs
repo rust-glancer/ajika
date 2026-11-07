@@ -16,7 +16,7 @@ use super::{
     record::{Address, Dependency, Slot},
     value::{Data, Value},
 };
-use crate::{Durability, Lifetime, Query, Result, Statistics};
+use crate::{Durability, Error, Lifetime, Query, Result, Statistics, error::ensure};
 
 /// The temporary log for one execution of a query function.
 ///
@@ -64,7 +64,7 @@ impl Frame {
             .depend(dependency, durability, lifetime);
     }
 
-    /// Reuse a read made through this frame, without revisiting the producer's shared locks.
+    /// Reuse a read made through this frame.
     /// The caller still checks cancellation. A miss must use normal evaluation and record its
     /// dependency before installing the value here.
     pub(crate) fn acquired<T: Send + Sync + 'static>(
@@ -83,7 +83,7 @@ impl Frame {
         let value = value
             .clone()
             .downcast()
-            .map_err(|_| anyhow::anyhow!("query value type changed"))?;
+            .map_err(|_| Error::invariant("query value type changed"))?;
         acquired.hits += 1;
         Ok(Some(value))
     }
@@ -204,9 +204,9 @@ impl Reads {
         // Outputs emitted directly by callbacks belong to the same producer. Their slots must
         // be unique across branches too; nested queries keep their outputs in their own frames.
         for (slot, value) in branch.outputs {
-            anyhow::ensure!(
+            ensure!(
                 self.outputs.insert(slot, value).is_none(),
-                "query emitted an output slot twice"
+                Error::contract("query emitted an output slot twice"),
             );
         }
         Ok(())

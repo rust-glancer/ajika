@@ -11,7 +11,9 @@ use std::{
     time::Instant,
 };
 
-use crate::{Persist, Result, codec, storage};
+use ajika_storage::Write;
+
+use crate::{Error, Persist, Result, UnavailableData, codec, error::ensure};
 
 /// A database's shared interner for immutable objects.
 ///
@@ -90,12 +92,11 @@ impl Interner {
                 .sum::<usize>()
     }
 
-    /// Move keys away from allocator pages shared with temporary discovery data. Collection
-    /// calls this after query working values have been released, so the old pages can empty.
-    /// Existing key handles remain valid; their allocations leave when those readers drop them.
+    /// Refresh key allocations after releasing query working values. Existing handles stay valid.
     pub(crate) fn reallocate(&self) {
         let started = Instant::now();
         let mut state = self.state.lock().expect("interner state");
+        // Moving long-lived keys can free allocator pages that also held temporary discovery data.
         for entries in state.namespaces.values_mut() {
             // Both indexes own the old keys: replacing just one would leave them pinned.
             // Preserve vector order (the IDs) and the saved prefix used by checkpointing.
@@ -121,9 +122,9 @@ impl Interner {
     pub(crate) fn load(rows: Vec<(String, u32, Vec<u8>)>) -> Result<Self> {
         let interner = Self::default();
         for (namespace, expected, key) in rows {
-            anyhow::ensure!(
+            ensure!(
                 interner.intern(namespace, &key)? == expected,
-                "invalid identity sequence"
+                Error::invalid_cache("invalid identity sequence"),
             );
         }
         for entries in interner
@@ -140,7 +141,7 @@ impl Interner {
 
     /// Write pending assignments while the operation is drained. A failed commit leaves saved
     /// lengths untouched; the next successful checkpoint can write the same assignments again.
-    pub(crate) fn write_pending(&self, write: &storage::Write) -> Result<Vec<(String, usize)>> {
+    pub(crate) fn write_pending(&self, write: &Write<'_>) -> Result<Vec<(String, usize)>> {
         let state = self.state.lock().expect("interner state");
         let mut saved = Vec::new();
         for (name, entries) in &state.namespaces {
@@ -176,6 +177,7 @@ pub trait Interned: Copy {
     const NAMESPACE: &'static str;
 
     fn from_raw(raw: u32) -> Self;
+
     fn as_raw(self) -> u32;
 
     fn intern(interner: &Interner, fields: Self::Fields) -> Result<Self> {
@@ -187,9 +189,10 @@ pub trait Interned: Copy {
 
     fn fields(self, interner: &Interner) -> Result<Self::Fields> {
         let namespace = Self::NAMESPACE;
+        let id = self.as_raw();
         let key = interner
-            .key(namespace, self.as_raw())
-            .ok_or_else(|| anyhow::anyhow!("unknown identity {} in {namespace}", self.as_raw()))?;
+            .key(namespace, id)
+            .ok_or(UnavailableData::Identity { namespace, id })?;
         codec::decode(&key)
     }
 }

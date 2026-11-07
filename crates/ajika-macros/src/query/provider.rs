@@ -92,6 +92,7 @@ impl Provider {
                 type Key = #key;
                 type Value = #value;
                 const NAME: &'static str = #identity;
+
                 fn storage() -> #runtime::Storage<Self::Value> { #storage }
                 #execute
                 #validate

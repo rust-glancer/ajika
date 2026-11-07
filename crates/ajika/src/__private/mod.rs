@@ -46,6 +46,7 @@ pub fn install_input<T: Input>(registry: &mut dyn Any) {
 pub trait DbType {
     type Services: Send + Sync + 'static;
 }
+
 impl<S: Send + Sync + 'static> DbType for fn(&Db<'_, S>) {
     type Services = S;
 }
@@ -57,9 +58,11 @@ impl<S: Send + Sync + 'static> DbType for fn(&Db<'_, S>) {
 pub trait ResultType<const FORWARD: bool> {
     type Value: Send + Sync + 'static;
 }
+
 impl<T: Send + Sync + 'static> ResultType<false> for Result<T> {
     type Value = T;
 }
+
 impl<T: Send + Sync + 'static> ResultType<true> for Result<Arc<T>> {
     type Value = T;
 }

@@ -117,8 +117,7 @@ impl Memos {
         if let Some(memo) = entries.get(key) {
             return Ok(memo.clone());
         }
-        // Only a new call needs an encoded replay address. Repeated calls use the typed key
-        // above, including when the query's result is large or expensive to serialize.
+        // Encode the replay address only when creating a memo. Later lookups use the typed key.
         let address = Address::new(Q::NAME, key)?;
         let memo = Arc::new(Memo {
             query_name: Q::NAME,

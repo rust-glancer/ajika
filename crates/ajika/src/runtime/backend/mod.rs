@@ -16,12 +16,14 @@ use std::{
     time::{Duration, SystemTime, UNIX_EPOCH},
 };
 
+use ajika_storage::{Database as StorageDatabase, Options};
+
 use super::{
     cache::Memo,
     record::{Address, Id, Record, RecordHeader, Slot},
     value::{Codec, Value},
 };
-use crate::{Lifetime, Result, Retention, Statistics, codec, storage};
+use crate::{Error, Lifetime, Result, Retention, Statistics, codec};
 
 mod encoding;
 mod session;
@@ -48,7 +50,7 @@ struct Usage {
 
 enum Store {
     Memory(Mutex<HashMap<Id, Stored>>),
-    Disk(storage::Database),
+    Disk(StorageDatabase),
 }
 
 /// The store of query results retained from completed operations.
@@ -90,10 +92,10 @@ impl Backend {
     pub(crate) fn open(path: &Path, epoch: &str) -> Result<Self> {
         // The runtime's record schema has its own version, separate from the storage
         // adapter and the application's persisted query types.
-        let mut database = storage::Database::open(
+        let mut database = StorageDatabase::open(
             path,
             &format!("query-runtime-3:{epoch}"),
-            storage::Options::default(),
+            Options::default(),
         )?;
         let mut assignments = database.snapshot()?.identities()?;
         // IDs cannot be recycled while live callers or saved values can still name them.
@@ -163,10 +165,11 @@ impl Backend {
     /// Stop further reuse after a failed storage-changing operation. This checks the backend's
     /// health, separately from cancellation or failure of one query operation.
     pub(crate) fn check(&self) -> Result<()> {
-        anyhow::ensure!(
-            self.usable.load(Ordering::Acquire),
-            "reopen query storage after its failed write"
-        );
+        if !self.usable.load(Ordering::Acquire) {
+            return Err(Error::unavailable_storage(
+                "reopen query storage after its failed write",
+            ));
+        }
         Ok(())
     }
 
@@ -424,7 +427,7 @@ impl Backend {
 
         // Dirty-only operations never open a disk writer. A save can promote a session value
         // directly: its typed value is already in retained, even if validation did not decode it.
-        let result = (|| {
+        let result: Result<()> = (|| {
             let mut write = match &self.store {
                 Store::Disk(database) if !durable.is_empty() => Some(database.begin_write()?),
                 _ => None,
@@ -561,12 +564,14 @@ impl Backend {
             }
             Ok(())
         })();
-        if result.as_ref().is_err_and(|error: &anyhow::Error| {
-            !error.is::<super::Cancelled>() && !error.is::<storage::StorageFull>()
-        }) {
-            self.usable.store(false, Ordering::Release);
-        }
-        result
+        result.map_err(|error| {
+            if !error.is_cancelled() && !error.is_capacity() {
+                self.usable.store(false, Ordering::Release);
+                error.require_reopen()
+            } else {
+                error
+            }
+        })
     }
 
     pub(crate) fn session_usage(&self) -> (u64, u64) {
@@ -621,7 +626,7 @@ impl Backend {
                 bytes -= item.bytes;
             }
         }
-        let result = (|| {
+        let result: Result<()> = (|| {
             match &self.store {
                 Store::Memory(store) => {
                     let mut store = store.lock().expect("memory storage");
@@ -667,7 +672,7 @@ impl Backend {
         })();
         if let Err(error) = result {
             self.usable.store(false, Ordering::Release);
-            return Err(error);
+            return Err(error.require_reopen());
         }
         // Stored removals succeeded. A failed pass must not advance this bookkeeping as if
         // its removals had been saved, so update the in-memory inventory only afterward.
@@ -704,19 +709,18 @@ impl Backend {
     pub(crate) fn compact(&mut self) -> Result<bool> {
         match &mut self.store {
             Store::Memory(_) => Ok(false),
-            Store::Disk(database) => database.compact(),
+            Store::Disk(database) => database.compact().map_err(Error::from),
         }
     }
 
     /// Storage relocation changes no logical query state. Run it outside the evaluator's
     /// working scope so there are no disk readers or query workers to coordinate with.
     pub(crate) fn maintain(&self) -> Result<()> {
-        if let Store::Disk(database) = &self.store {
-            let result = database.maintain();
-            if result.is_err() {
-                self.usable.store(false, Ordering::Release);
-            }
-            result?;
+        if let Store::Disk(database) = &self.store
+            && let Err(error) = database.maintain()
+        {
+            self.usable.store(false, Ordering::Release);
+            return Err(Error::from(error).require_reopen());
         }
         Ok(())
     }

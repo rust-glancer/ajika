@@ -1,11 +1,12 @@
 use std::sync::Arc;
 
-use ajika::{Database, Output, Result};
+use ajika::{Database, Output};
+use anyhow::Result;
 
 use super::{Db, Settings, Sources, declarations, diagnostics, inputs, retention};
 
 #[ajika::query]
-fn repeated_output(db: &Db, output: Output<String>, consumer: u32) -> Result<String> {
+fn repeated_output(db: &Db, output: Output<String>, consumer: u32) -> ajika::Result<String> {
     let value = output.value(db)?;
     for _ in 0..100 {
         assert!(Arc::ptr_eq(&value, &output.value(db)?));
@@ -14,7 +15,7 @@ fn repeated_output(db: &Db, output: Output<String>, consumer: u32) -> Result<Str
 }
 
 #[ajika::query]
-fn parallel_outputs(db: &Db) -> Result<Vec<String>> {
+fn parallel_outputs(db: &Db) -> ajika::Result<Vec<String>> {
     let output = declarations(db)?.shape.clone();
     let values = db.parallel_map(&[0, 1, 2, 3], |db, consumer| {
         Ok(repeated_output(db, output.clone(), *consumer)?
@@ -41,12 +42,12 @@ fn repeated_output_reads_remain_dependencies_in_every_consumer() -> Result<()> {
 }
 
 #[ajika::query]
-fn configuration(db: &Db) -> Result<u32> {
+fn configuration(db: &Db) -> ajika::Result<u32> {
     Settings::at(()).configuration(db)
 }
 
 #[ajika::query]
-fn configuration_label(db: &Db) -> Result<String> {
+fn configuration_label(db: &Db) -> ajika::Result<String> {
     Ok(format!("configuration: {}", configuration(db)?))
 }
 
@@ -108,7 +109,7 @@ struct OptionalPayload {
 }
 
 #[ajika::query]
-fn optional_payload(db: &Db) -> Result<OptionalPayload> {
+fn optional_payload(db: &Db) -> ajika::Result<OptionalPayload> {
     let text = Settings::at(()).text(db)?;
     let outputs = if text.is_empty() {
         OptionalPayload::new(db, None, None)?
@@ -119,7 +120,7 @@ fn optional_payload(db: &Db) -> Result<OptionalPayload> {
 }
 
 #[ajika::query]
-fn optional_length(db: &Db) -> Result<usize> {
+fn optional_length(db: &Db) -> ajika::Result<usize> {
     let length = match &optional_payload(db)?.text {
         Some(text) => text.value(db)?.len(),
         None => 0,
@@ -128,7 +129,7 @@ fn optional_length(db: &Db) -> Result<usize> {
 }
 
 #[ajika::query]
-fn selected_length(db: &Db, output: Output<String>) -> Result<usize> {
+fn selected_length(db: &Db, output: Output<String>) -> ajika::Result<usize> {
     Ok(output.value(db)?.len())
 }
 
@@ -195,21 +196,24 @@ fn removing_an_output_updates_its_consumers_and_reclaims_its_payload() -> Result
 // Deliberately omit registration. Direct typed calls work, but replaying this name from a saved
 // parent's dependencies cannot prove validity. It must rerun the parent, not claim an input edit.
 struct Unregistered;
+
 impl ajika::Query for Unregistered {
     type Services = ();
     type Key = ();
     type Value = u32;
     const NAME: &'static str = "unregistered";
-    fn execute(_: &Db, _: ()) -> Result<Arc<u32>> {
+
+    fn execute(_: &Db, _: ()) -> ajika::Result<Arc<u32>> {
         Ok(Arc::new(7))
     }
+
     fn storage() -> ajika::Storage<u32> {
         ajika::Storage::persistent()
     }
 }
 
 #[ajika::query(forward)]
-fn uses_unregistered(db: &Db) -> Result<Arc<u32>> {
+fn uses_unregistered(db: &Db) -> ajika::Result<Arc<u32>> {
     db.query::<Unregistered>(())
 }
 

@@ -39,6 +39,7 @@ includes a query for the fixed `notes.txt` path:
 
 ```rust
 # extern crate ajika;
+# extern crate anyhow;
 {{#rustdoc_include ../../../examples/word-count/src/main.rs:forward}}
 ```
 

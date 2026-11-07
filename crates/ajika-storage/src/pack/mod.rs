@@ -11,10 +11,9 @@ use std::{
     time::{Duration, Instant},
 };
 
-use anyhow::Result;
-
 use crate::{
-    EncodedValue, Id, StorageFull,
+    EncodedValue, Error, Id, Result,
+    error::ensure,
     format::{self, FrameHeader, Location, PackHeader, PackId},
 };
 
@@ -88,9 +87,9 @@ impl PackWriter {
             writer.write_all(&buffer[..length])?;
             remaining -= length as u64;
         }
-        anyhow::ensure!(
+        ensure!(
             hash.finalize().as_bytes() == &expected,
-            "invalid stored value checksum"
+            Error::invalid_cache("invalid stored value checksum"),
         );
         self.failed = false;
         Ok(location)
@@ -102,7 +101,7 @@ impl PackWriter {
 
     fn reserve(&mut self, length: u64) -> Result<()> {
         if length > self.remaining.saturating_sub(self.written) {
-            return Err(StorageFull.into());
+            return Err(Error::capacity());
         }
         self.written += length;
         Ok(())
@@ -112,10 +111,11 @@ impl PackWriter {
     /// partial prefix in the file; finish must then reject publication even if its caller
     /// caught the error and tried to commit the surrounding transaction.
     fn begin_frame(&mut self, header: FrameHeader) -> Result<Location> {
-        anyhow::ensure!(
-            !self.failed,
-            "discard storage write after its failed append"
-        );
+        if self.failed {
+            return Err(Error::unavailable(
+                "discard storage write after its failed append",
+            ));
+        }
         self.failed = true;
         self.reserve(header.frame_length())?;
         if self
@@ -132,7 +132,7 @@ impl PackWriter {
             let file = File::create_new(&path)?;
             self.created.push(path);
             let mut writer = BufWriter::with_capacity(64 * 1024, file);
-            writer.write_all(&wincode::serialize(&PackHeader {
+            writer.write_all(&format::encode(&PackHeader {
                 magic: PackHeader::MAGIC,
                 instance: self.instance,
                 pack: id,
@@ -145,7 +145,7 @@ impl PackWriter {
         }
         let pack = self.current.as_mut().expect("pack created");
         let offset = pack.length;
-        pack.writer.write_all(&wincode::serialize(&header)?)?;
+        pack.writer.write_all(&format::encode(&header)?)?;
         pack.length += header.frame_length();
         Ok(Location::Pack {
             pack: pack.id,
@@ -166,10 +166,11 @@ impl PackWriter {
 
     /// Complete the bytes and file names before the index commit can name them.
     pub(crate) fn finish(&mut self) -> Result<Duration> {
-        anyhow::ensure!(
-            !self.failed,
-            "discard storage write after its failed append"
-        );
+        if self.failed {
+            return Err(Error::unavailable(
+                "discard storage write after its failed append",
+            ));
+        }
         self.seal()?;
         if !self.created.is_empty() {
             let started = Instant::now();

@@ -28,6 +28,7 @@ stores text together with its retention policy:
 
 ```rust
 # extern crate ajika;
+# extern crate anyhow;
 # extern crate tempfile;
 {{#rustdoc_include ../../../examples/editor-session/src/main.rs:input}}
 ```
@@ -39,6 +40,7 @@ After computing the saved file, the application creates a sparse input overlay:
 
 ```rust
 # extern crate ajika;
+# extern crate anyhow;
 # extern crate tempfile;
 {{#rustdoc_include ../../../examples/editor-session/src/main.rs:overlay}}
 ```
@@ -61,6 +63,7 @@ as persistent:
 
 ```rust
 # extern crate ajika;
+# extern crate anyhow;
 # extern crate tempfile;
 {{#rustdoc_include ../../../examples/editor-session/src/main.rs:save}}
 ```
