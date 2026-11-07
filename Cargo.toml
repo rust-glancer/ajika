@@ -13,7 +13,7 @@ exclude = ["crates/ajika/tests/registry-fixture"]
 resolver = "3"
 
 [workspace.package]
-version = "0.1.0"
+version = "0.1.1"
 edition = "2024"
 authors = ["Igor Aleksanov <popzxc@yandex.ru>"]
 license = "MIT OR Apache-2.0"
@@ -30,9 +30,9 @@ libraries = [
 ]
 
 [workspace.dependencies]
-ajika = { path = "crates/ajika", version = "0.1.0" }
-ajika_macros = { path = "crates/ajika-macros", version = "0.1.0" }
-ajika_storage = { path = "crates/ajika-storage", version = "0.1.0" }
+ajika = { path = "crates/ajika", version = "0.1.1" }
+ajika_macros = { path = "crates/ajika-macros", version = "0.1.1" }
+ajika_storage = { path = "crates/ajika-storage", version = "0.1.1" }
 
 anyhow = "1.0.103"
 blake3 = "1.8.5"

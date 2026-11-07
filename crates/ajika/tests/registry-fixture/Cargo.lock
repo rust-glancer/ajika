@@ -4,7 +4,7 @@ version = 4
 
 [[package]]
 name = "ajika"
-version = "0.1.0"
+version = "0.1.1"
 dependencies = [
  "ajika_macros",
  "ajika_storage",
@@ -18,7 +18,7 @@ dependencies = [
 
 [[package]]
 name = "ajika_macros"
-version = "0.1.0"
+version = "0.1.1"
 dependencies = [
  "proc-macro2",
  "quote",
@@ -27,7 +27,7 @@ dependencies = [
 
 [[package]]
 name = "ajika_storage"
-version = "0.1.0"
+version = "0.1.1"
 dependencies = [
  "blake3",
  "getrandom",
