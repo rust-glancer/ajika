@@ -32,16 +32,6 @@
       "type": "toml",
       "path": "Cargo.lock",
       "jsonpath": "$.package[?(!@.source)].version"
-    },
-    {
-      "type": "toml",
-      "path": "crates/ajika/tests/registry-fixture/Cargo.toml",
-      "jsonpath": "$.workspace.dependencies.ajika.version"
-    },
-    {
-      "type": "toml",
-      "path": "crates/ajika/tests/registry-fixture/Cargo.lock",
-      "jsonpath": "$.package[?(@.name.value == 'ajika' || @.name.value == 'ajika_macros' || @.name.value == 'ajika_storage')].version"
     }
   ],
   "packages": {

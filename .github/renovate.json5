@@ -17,7 +17,6 @@
     "prCreation": "not-pending",
     "rangeStrategy": "bump",
     "rebaseWhen": "behind-base-branch",
-    // The replay fixture resolves independently and needs lockfile updates too.
     "lockFileMaintenance": {
         "enabled": true,
         "schedule": ["* 0-5 * * 0"],

@@ -90,10 +90,8 @@ open the editor.
 
 ## Development
 
-See [CONTRIBUTING.md](CONTRIBUTING.md) for tool setup and the test layout.
-
 ```sh
-just test       # behavior tests, doctests, and release replay tests
+just test       # behavior tests and doctests
 just bench      # runtime and storage benchmarks
 just lint       # formatting, Clippy, and shared Dylint checks
 just deny       # dependency advisories, licenses, and sources

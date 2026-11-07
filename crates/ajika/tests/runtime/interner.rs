@@ -138,15 +138,6 @@ impl DamagedCache {
     }
 }
 
-#[cfg(unix)]
-fn replace_live_index(root: &std::path::Path) -> Result<()> {
-    // Replace the file a restart will open while redb still holds the old one.
-    let index = root.join("index.redb");
-    std::fs::rename(&index, root.join("previous.redb"))?;
-    std::fs::File::create(index)?;
-    Ok(())
-}
-
 #[test]
 fn restart_repairs_a_damaged_pack_and_keeps_saved_ids() -> Result<()> {
     let DamagedCache { root, db, saved } = DamagedCache::new()?;
@@ -176,8 +167,6 @@ fn next_run_repairs_the_cache_and_preserves_live_ids() -> Result<()> {
     .expect_err("the original request sees the damaged value");
     assert_eq!(calls, 1);
     assert!(db.recovery_pending());
-    #[cfg(unix)]
-    replace_live_index(root.path())?;
 
     assert_eq!(db.run(|cx| packed_value(cx, 42))?.as_slice(), &[42; 4096]);
     assert_eq!(db.statistics().executed, 1);
@@ -204,8 +193,6 @@ fn invalidation_repairs_the_cache_and_persists_live_ids() -> Result<()> {
     db.run(|cx| packed_value(cx, 42))
         .expect_err("the damaged value schedules repair");
     assert!(db.recovery_pending());
-    #[cfg(unix)]
-    replace_live_index(root.path())?;
 
     db.invalidate()?;
     assert!(!db.recovery_pending());

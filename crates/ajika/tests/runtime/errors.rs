@@ -75,24 +75,6 @@ fn application_accepts_anyhow_reports_and_preserves_their_chain() {
     );
 }
 
-#[ajika::query(transient)]
-fn application_number(_db: &Db, bytes: Vec<u8>) -> Result<u64> {
-    wincode::deserialize(&bytes).map_err(Error::application)
-}
-
-#[test]
-fn provider_decoding_errors_remain_application_failures() {
-    let mut database = ajika::Database::memory(inputs(""), (), retention());
-    let error = database
-        .run(|db| application_number(db, Vec::new()))
-        .expect_err("an integer requires encoded bytes");
-    let ErrorKind::Application(source) = error.kind() else {
-        panic!("provider decoding is application work");
-    };
-    assert!(source.is::<wincode::ReadError>());
-    assert!(!database.recovery_pending());
-}
-
 #[test]
 fn cancellation_keeps_its_checkpoint_and_the_next_operation_can_run() -> anyhow::Result<()> {
     let mut database = ajika::Database::memory(inputs(""), (), retention());

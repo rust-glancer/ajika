@@ -120,7 +120,9 @@ fn parallel_build_and_restart_reuse_the_same_pages() -> Result<()> {
     let mut host = Host::open(&root, Some(&cache), 1)?;
     let reopened = host.build()?;
     assert_eq!(reopened.work.executed, 0, "saved results survive reopening");
+    assert_eq!(first.value.len(), reopened.value.len());
     for (before, after) in first.value.iter().zip(&reopened.value) {
+        assert_eq!(before.path, after.path);
         assert_eq!(
             before.html, after.html,
             "worker count does not change output"

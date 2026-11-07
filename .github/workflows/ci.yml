@@ -60,7 +60,7 @@ jobs:
       - uses: taiki-e/install-action@16b05812d776ae1dfaabc8277e421fb6d2506419 # v2.82.7
         with:
           tool: cargo-nextest@0.9.132,just@1.48.1
-      - name: Run tests, doctests, and release replay
+      - name: Run workspace tests and doctests
         run: just test
 
   docs:

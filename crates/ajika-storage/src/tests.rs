@@ -200,33 +200,35 @@ fn relocation_preserves_compression_when_the_write_policy_changes() -> Result<()
 
 #[test]
 fn small_writes_consolidate_and_repeated_replacements_settle() -> Result<()> {
+    const KEYS: u8 = 32;
     let root = tempfile::tempdir()?;
     let mut database = Database::open(root.path(), "fixture", Options::default())?;
     let mut peak_files = 0;
-    for turn in 0..256 {
-        let id = (turn % 32) as u8;
+    for turn in 0..3 * KEYS {
+        let id = turn % KEYS;
         let mut write = database.begin_write()?;
-        write.write_value(&[id; 32], Compression::None.encode(vec![id; 16 * 1024])?)?;
+        write.write_value(&[id; 32], Compression::None.encode(vec![turn; 16 * 1024])?)?;
         write.commit()?;
         database.maintain()?;
         peak_files = peak_files.max(database.statistics()?.pack_files);
-        if turn == 127 {
+        if turn + 1 == 2 * KEYS {
             drop(database);
             database = Database::open(root.path(), "fixture", Options::default())?;
         }
     }
     assert!(
-        peak_files < 32,
+        peak_files < u64::from(KEYS),
         "consolidation bounds files during repeated writes: {peak_files}"
     );
     database.compact()?;
     let stats = database.statistics()?;
-    assert_eq!((stats.values, stats.dead_pack_bytes), (32, 0));
+    assert_eq!((stats.values, stats.dead_pack_bytes), (u64::from(KEYS), 0));
     assert_eq!(stats.pack_files, 1);
-    for id in 0..32 {
+    let read = database.snapshot()?;
+    for id in 0..KEYS {
         assert_eq!(
-            database.snapshot()?.read_value(&[id; 32], 16 * 1024)?,
-            vec![id; 16 * 1024]
+            read.read_value(&[id; 32], 16 * 1024)?,
+            vec![2 * KEYS + id; 16 * 1024]
         );
     }
     Ok(())
