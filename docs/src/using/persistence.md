@@ -89,9 +89,10 @@ cache preserves readable saved identities. If the identity table is lost, openin
 starts with a fresh interner.
 
 If a request discovers corruption or encounters an uncertain commit, it returns
-the failure. The next `run` repairs the cache before invoking the callback, using
-the same inputs and live interner. If the disk stays unavailable, `run` returns a
-storage error.
+the failure. Use `database.recovery_pending()` to anticipate repair work before
+the next uncancelled `run` invokes its callback. Automatic maintenance can also
+schedule repair after a successful run. Repair uses the same inputs and live
+interner. If the disk stays unavailable, `run` returns a storage error.
 
 Use `database.invalidate()` to explicitly discard query work. It can rebuild a
 damaged cache while preserving the live interner. `collect` and `compact` report

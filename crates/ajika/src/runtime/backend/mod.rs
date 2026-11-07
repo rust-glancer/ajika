@@ -181,6 +181,10 @@ impl Backend {
         Ok(usage)
     }
 
+    pub(crate) fn recovery_pending(&self) -> bool {
+        self.recovery.get().is_some()
+    }
+
     pub(crate) fn recover(&mut self) -> Result<()> {
         let Some(reason) = self.recovery.get().cloned() else {
             return Ok(());
@@ -188,7 +192,7 @@ impl Backend {
         let Store::Disk(database) = &mut self.store else {
             unreachable!("recovery belongs to disk storage")
         };
-        let loaded = if reason.requires_reopen() {
+        let loaded = if reason.storage_needs_reopen() {
             (|| {
                 database.reopen()?;
                 self.interner.reconcile(&database.snapshot()?.identities()?)
@@ -196,15 +200,11 @@ impl Backend {
         } else {
             Err(reason)
         };
-        match Self::restore_usage(database, &self.interner, loaded) {
-            Ok(usage) => {
-                self.replace_usage(usage);
-                self.recovery.take();
-                Ok(())
-            }
-            // Keep the original repair decision across temporary I/O failures.
-            Err(error) => Err(error.require_reopen()),
-        }
+        // Keep the original repair decision across temporary I/O failures.
+        let usage = Self::restore_usage(database, &self.interner, loaded)?;
+        self.replace_usage(usage);
+        self.recovery.take();
+        Ok(())
     }
 
     fn replace_usage(&mut self, usage: HashMap<Id, Usage>) {
@@ -253,13 +253,10 @@ impl Backend {
 
     /// Record failures at the storage boundary so a callback returning its own error cannot
     /// hide a repair need. Ordinary failures leave the last committed checkpoint usable.
-    pub(crate) fn observe<T>(&self, result: Result<T>) -> Result<T> {
-        result.map_err(|error| {
-            if self.is_disk() && (error.is_invalid_cache() || error.requires_reopen()) {
+    fn observe<T>(&self, result: Result<T>) -> Result<T> {
+        result.inspect_err(|error| {
+            if self.is_disk() && (error.is_invalid_cache() || error.storage_needs_reopen()) {
                 let _ = self.recovery.set(error.clone());
-                error.require_reopen()
-            } else {
-                error
             }
         })
     }

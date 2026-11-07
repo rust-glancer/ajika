@@ -90,7 +90,7 @@ fn provider_decoding_errors_remain_application_failures() {
         panic!("provider decoding is application work");
     };
     assert!(source.is::<wincode::ReadError>());
-    assert!(!error.requires_reopen());
+    assert!(!database.recovery_pending());
 }
 
 #[test]

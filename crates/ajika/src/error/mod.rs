@@ -95,13 +95,6 @@ impl PersistenceError {
             _ => None,
         }
     }
-
-    fn requires_reopen(&self) -> bool {
-        match &self.0 {
-            PersistenceRepr::Storage(error) => error.requires_reopen(),
-            _ => false,
-        }
-    }
 }
 
 /// The reason an operation stopped, with details for callers that can act on it.
@@ -163,15 +156,12 @@ enum ErrorRepr {
 #[derive(Clone, Debug)]
 pub struct Error {
     inner: Arc<ErrorRepr>,
-    reopen: bool,
 }
 
 impl Error {
     fn new(inner: ErrorRepr) -> Self {
-        let reopen = matches!(&inner, ErrorRepr::Persistence(error) if error.requires_reopen());
         Self {
             inner: Arc::new(inner),
-            reopen,
         }
     }
 
@@ -226,30 +216,22 @@ impl Error {
     }
 
     /// Add a message about the failed step, such as `"loading analysis inputs"`. The original
-    /// cause, category, and recovery status remain available. Cancellation keeps its checkpoint.
+    /// cause and category remain available. Cancellation keeps its checkpoint.
     pub fn context(self, message: impl Into<String>) -> Self {
         if self.is_cancelled() {
             return self;
         }
-        let reopen = self.reopen;
-        Self {
-            inner: Arc::new(ErrorRepr::Context {
-                message: message.into(),
-                source: self,
-            }),
-            reopen,
-        }
+        Self::new(ErrorRepr::Context {
+            message: message.into(),
+            source: self,
+        })
     }
 
-    /// Whether the failure called for cache recovery. The next [`Database::run`](crate::Database::run)
-    /// attempts recovery on the same database before starting the callback.
-    pub fn requires_reopen(&self) -> bool {
-        self.reopen
-    }
-
-    pub(crate) fn require_reopen(mut self) -> Self {
-        self.reopen = true;
-        self
+    pub(crate) fn storage_needs_reopen(&self) -> bool {
+        let ErrorKind::Persistence(error) = self.kind() else {
+            return false;
+        };
+        matches!(&error.0, PersistenceRepr::Storage(source) if source.requires_reopen())
     }
 
     pub(crate) fn invariant(message: impl Into<String>) -> Self {
@@ -369,33 +351,12 @@ mod tests {
         let cases = [
             (error.clone(), "storage I/O failed: pack device unavailable"),
             (
-                error.clone().context("saving results"),
-                "saving results: storage I/O failed: pack device unavailable",
-            ),
-            (
-                error.require_reopen().context("saving results"),
+                error.context("saving results"),
                 "saving results: storage I/O failed: pack device unavailable",
             ),
         ];
         for (error, expected) in cases {
             assert_eq!(format!("{:#}", anyhow::Error::new(error)), expected);
         }
-    }
-
-    #[test]
-    fn recovery_status_survives_context_without_changing_the_cause() {
-        let error = Error::from(ajika_storage::Error::from(std::io::Error::other(
-            "pack write failed",
-        )));
-        let shared = error.clone();
-        let error = error.require_reopen().context("saving results");
-        assert!(error.requires_reopen());
-        assert!(
-            !shared.requires_reopen(),
-            "recovery status describes the failed operation"
-        );
-        assert!(
-            matches!(error.kind(), super::ErrorKind::Persistence(error) if error.kind() == super::PersistenceErrorKind::Io)
-        );
     }
 }

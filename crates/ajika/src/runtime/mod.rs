@@ -133,6 +133,12 @@ impl<S: Send + Sync + 'static> Database<S> {
         self.cancellation.clone()
     }
 
+    /// Whether the next uncancelled [`run`](Self::run) will attempt cache repair before
+    /// invoking its callback. Automatic maintenance can schedule repair after a successful run.
+    pub fn recovery_pending(&self) -> bool {
+        self.backend.recovery_pending()
+    }
+
     /// Counters from the latest operation, with any subsequent collection included.
     pub fn statistics(&self) -> Statistics {
         self.statistics

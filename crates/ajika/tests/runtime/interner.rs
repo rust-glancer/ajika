@@ -103,6 +103,18 @@ fn packed_value(_cx: &Db, byte: u8) -> ajika::Result<Vec<u8>> {
     Ok(vec![byte; 4096])
 }
 
+fn truncate_only_pack(root: &std::path::Path) -> Result<()> {
+    let pack = std::fs::read_dir(root.join("packs"))?
+        .next()
+        .expect("one packed value")?
+        .path();
+    std::fs::OpenOptions::new()
+        .write(true)
+        .open(pack)?
+        .set_len(40)?;
+    Ok(())
+}
+
 #[test]
 fn cache_recovery_keeps_identity_assignments() -> Result<()> {
     for recovery in ["next run", "invalidate", "restart"] {
@@ -115,14 +127,7 @@ fn cache_recovery_keeps_identity_assignments() -> Result<()> {
         })?;
         let interner = db.interner();
 
-        let pack = std::fs::read_dir(root.path().join("packs"))?
-            .next()
-            .expect("one packed value")?
-            .path();
-        std::fs::OpenOptions::new()
-            .write(true)
-            .open(pack)?
-            .set_len(40)?;
+        truncate_only_pack(root.path())?;
 
         let pending = if recovery == "restart" {
             drop(db);
@@ -137,11 +142,13 @@ fn cache_recovery_keeps_identity_assignments() -> Result<()> {
             })
             .expect_err("the original request sees the damaged value");
             assert_eq!(calls, 1);
+            assert!(db.recovery_pending());
             if recovery == "invalidate" {
                 // Unix lets us remove the backing index while the owner still holds it open.
                 #[cfg(unix)]
                 std::fs::remove_file(root.path().join("index.redb"))?;
                 db.invalidate()?;
+                assert!(!db.recovery_pending());
                 assert_eq!(pending.path(&db.interner())?, "pending.rs");
                 drop(db);
                 db = Database::open(root.path(), "test", inputs(""), (), retention())?;
@@ -164,6 +171,32 @@ fn cache_recovery_keeps_identity_assignments() -> Result<()> {
 }
 
 #[test]
+fn successful_run_can_leave_recovery_pending() -> Result<()> {
+    let root = tempfile::tempdir()?;
+    let mut db = Database::open(root.path(), "test", inputs(""), (), retention())?;
+    db.run(|cx| packed_value(cx, 0))?;
+    truncate_only_pack(root.path())?;
+
+    // Independent writes let maintenance find the damage when it consolidates packs.
+    for byte in 1..=32 {
+        assert_eq!(db.run(|cx| packed_value(cx, byte))?[0], byte);
+        if db.recovery_pending() {
+            break;
+        }
+    }
+    assert!(db.recovery_pending(), "maintenance found the damaged pack");
+
+    db.cancellation().cancel();
+    let error = db.run(|_| Ok(())).expect_err("request was cancelled");
+    assert!(error.is_cancelled());
+    assert!(db.recovery_pending());
+
+    db.run(|_| Ok(()))?;
+    assert!(!db.recovery_pending());
+    Ok(())
+}
+
+#[test]
 fn an_aborted_pack_write_keeps_the_warm_checkpoint() -> Result<()> {
     let root = tempfile::tempdir()?;
     let mut db = Database::open(root.path(), "test", inputs(""), (), retention())?;
@@ -171,6 +204,7 @@ fn an_aborted_pack_write_keeps_the_warm_checkpoint() -> Result<()> {
     std::fs::remove_dir(root.path().join("packs"))?;
     db.run(|cx| packed_value(cx, 42))
         .expect_err("a pack needs a writable directory");
+    assert!(!db.recovery_pending());
     std::fs::create_dir(root.path().join("packs"))?;
 
     assert_eq!(db.run(|cx| file_id(cx, "saved.rs".into()))?, saved);
