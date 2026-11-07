@@ -53,10 +53,10 @@ input makes an answer outdated.
 inputs and interner state. The next operation computes against those
 inputs without old query answers.
 
-A full storage reset, including an incompatible epoch, can discard interner
-state too. Keep interned IDs and saved output handles within the originating
-cache's lifecycle. They should not become the only identifiers in an application's
-authoritative data.
+Live recovery preserves interned IDs even if it has to rebuild the disk cache.
+At startup, an incompatible epoch or unreadable identity table can start a new
+interner. Keep interned IDs and saved output handles within the originating
+cache's lifecycle.
 
 ## Schedule maintenance around application work
 
@@ -76,7 +76,5 @@ much logical data remains, while `storage_statistics()` reports physical disk
 usage. The [cost and reuse guide](../using/diagnostics.md) explains how to read those
 measurements and how compression affects stored size.
 
-If the backend reports an uncertain write failure, reopen it or successfully
-invalidate it before continuing. Rebuilding is an acceptable recovery for derived
-data. Application inputs and accepted user-visible state must remain available
-independently of that recovery.
+See [recovering a cache](../using/persistence.md#recovering-a-cache) for how
+startup and later operations handle storage failures.

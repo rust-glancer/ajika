@@ -328,3 +328,27 @@ fn interrupted_storage_worker() -> Result<()> {
     }
     std::process::exit(73);
 }
+
+#[test]
+fn reloading_a_stopped_owner_keeps_its_checkpoint_and_lock() -> Result<()> {
+    let root = tempfile::tempdir()?;
+    let mut database = Database::open(root.path(), "fixture", Options::default())?;
+    let write = database.begin_write()?;
+    write.set_metadata(&[1; 32], b"complete checkpoint")?;
+    write.commit()?;
+
+    // Model the state after an uncertain commit. The published catalog remains on disk.
+    database
+        .healthy
+        .store(false, std::sync::atomic::Ordering::Release);
+    database.reopen()?;
+    assert_eq!(
+        database.snapshot()?.metadata(&[1; 32])?.as_deref(),
+        Some(b"complete checkpoint".as_slice())
+    );
+    assert!(matches!(
+        Database::open(root.path(), "fixture", Options::default()),
+        Err(error) if error.kind() == crate::ErrorKind::InUse
+    ));
+    Ok(())
+}

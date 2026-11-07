@@ -8,6 +8,7 @@
 
 use std::{
     collections::HashMap,
+    error::Error as _,
     fmt, panic,
     path::Path,
     sync::{
@@ -86,6 +87,7 @@ impl<S: Send + Sync + 'static> Database<S> {
     /// Open or create a database whose saved results can survive process restarts.
     /// Old records are checked against `inputs` when requested, not assumed valid merely because
     /// they exist. A different application epoch discards them when opening the directory.
+    /// Confirmed corruption can also trigger a rebuild, which is logged as a warning.
     ///
     /// Change the epoch when query semantics or stored types change. Ajika detects changes in
     /// tracked data, but cannot infer that editing a query's Rust implementation changes its answer.
@@ -228,8 +230,9 @@ impl<S: Send + Sync + 'static> Database<S> {
     ///
     /// Failure before checkpointing discards pending work, including successful child queries.
     /// The host should reject inconsistent captured inputs before returning from the callback.
-    /// A cancellation or maintenance error after commit can make this return an error even
-    /// though the cache was saved.
+    /// A late cancellation can still return an error after a commit. Automatic maintenance
+    /// failures are logged. If cache recovery is needed, the next run attempts it before
+    /// invoking its callback, using the same inputs and interner.
     ///
     /// The callback uses the same [`Result`] as query providers. A recorded query failure takes
     /// precedence over cancellation, including cancellation returned directly by the callback.
@@ -242,6 +245,16 @@ impl<S: Send + Sync + 'static> Database<S> {
         // Reset cancellation after a panic too, so a host that catches it can start another
         // operation. Working memos and query claims clean up through their own scopes.
         let outcome = panic::catch_unwind(panic::AssertUnwindSafe(|| {
+            // Repair runs at the exclusive boundary, before the callback or its workers can
+            // borrow the cache. A request cancelled before entry can skip that work.
+            if let Err(error) = self
+                .cancellation
+                .inner
+                .check()
+                .and_then(|()| self.backend.recover())
+            {
+                return (Err(error), Statistics::default());
+            }
             let operation = Operation::new(self);
             let frame = Frame::new(None);
             let db = Db {
@@ -298,22 +311,29 @@ impl<S: Send + Sync + 'static> Database<S> {
         match outcome {
             Ok((result, statistics)) => {
                 self.statistics = statistics;
-                if result.is_ok()
+                // Reclamation can still make progress after a capacity refusal. Its failure
+                // must not replace either a completed answer or the error that stopped the run.
+                let maintenance = if result.is_ok()
                     && (self.last_collection.elapsed() >= Duration::from_secs(60)
                         || self.backend.over_budget(self.retention))
                 {
-                    self.collect()?;
+                    self.collect().map(|_| ())
+                } else if result.is_ok() || result.as_ref().is_err_and(Error::is_capacity) {
+                    self.backend.maintain()
+                } else {
+                    Ok(())
+                };
+                if let Err(error) = maintenance {
+                    tracing::warn!(
+                        %error,
+                        cause = error.source().map(tracing::field::display),
+                        "automatic cache maintenance failed"
+                    );
                 }
                 (self.statistics.stored_queries, self.statistics.stored_bytes) =
                     self.backend.usage();
                 let removed = self.backend.collect_session(self.session_retention);
                 self.statistics.collected += removed as u64;
-                // Relocation needs neither query execution nor the released working values.
-                // A capacity refusal still permits this pass, so reclamation can make progress
-                // without poisoning otherwise readable cached results.
-                if result.is_ok() || result.as_ref().is_err_and(Error::is_capacity) {
-                    self.backend.maintain()?;
-                }
                 (
                     self.statistics.session_queries,
                     self.statistics.session_bytes,
@@ -341,20 +361,24 @@ impl<S: Send + Sync + 'static> Database<S> {
         self.backend.interner.reallocate();
         self.last_collection = Instant::now();
         self.statistics.collected += removed as u64;
-        self.backend.maintain()?;
         (self.statistics.stored_queries, self.statistics.stored_bytes) = self.backend.usage();
         (
             self.statistics.session_queries,
             self.statistics.session_bytes,
         ) = self.backend.session_usage();
+        self.backend.maintain()?;
         Ok(removed)
     }
 
     /// Discard all remembered query results, both in storage and in the running database.
-    /// The captured inputs stay installed; the next operation computes its answers from them
-    /// without reusing old query work. No operation may be active during this reset.
+    /// The captured inputs and live interner stay installed. This also repairs an unusable cache
+    /// when the disk can still be written. The next operation computes its answers from scratch.
     pub fn invalidate(&mut self) -> Result<()> {
         self.backend.invalidate()?;
+        self.statistics.stored_queries = 0;
+        self.statistics.stored_bytes = 0;
+        self.statistics.session_queries = 0;
+        self.statistics.session_bytes = 0;
         Ok(())
     }
 

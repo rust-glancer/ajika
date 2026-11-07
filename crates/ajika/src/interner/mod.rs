@@ -11,7 +11,7 @@ use std::{
     time::Instant,
 };
 
-use ajika_storage::Write;
+use ajika_storage::{Database as StorageDatabase, Identity, Write};
 
 use crate::{Error, Persist, Result, UnavailableData, codec, error::ensure};
 
@@ -139,6 +139,56 @@ impl Interner {
         Ok(interner)
     }
 
+    /// A recovered checkpoint may have saved a different prefix than this process observed.
+    /// Compare the whole saved mapping before letting any of its query records be reused.
+    pub(crate) fn reconcile(&self, rows: &[(String, u32, Vec<u8>)]) -> Result<()> {
+        let mut state = self.state.lock().expect("interner state");
+        let mut prefixes = HashMap::<&str, usize>::new();
+        for (name, id, key) in rows {
+            let count = prefixes.entry(name).or_default();
+            let live = state
+                .namespaces
+                .get(name)
+                .and_then(|entries| entries.keys.get(*count));
+            ensure!(
+                *id as usize == *count && live.is_some_and(|live| **live == **key),
+                Error::invalid_cache("saved identities disagree with the live interner"),
+            );
+            *count += 1;
+        }
+        for (name, entries) in &mut state.namespaces {
+            entries.saved = prefixes.get(name.as_str()).copied().unwrap_or(0);
+        }
+        Ok(())
+    }
+
+    pub(crate) fn rebuild(&self, database: &mut StorageDatabase) -> Result<()> {
+        // Cloned keys let the host keep interning while the replacement is written.
+        let snapshot = self
+            .state
+            .lock()
+            .expect("interner state")
+            .namespaces
+            .iter()
+            .map(|(name, entries)| (name.clone(), entries.keys.clone()))
+            .collect::<Vec<_>>();
+        let identities = snapshot
+            .iter()
+            .flat_map(|(name, keys)| {
+                keys.iter().enumerate().map(move |(id, key)| Identity {
+                    namespace: name,
+                    id: id as u32,
+                    key,
+                })
+            })
+            .collect::<Vec<_>>();
+        // Publish the saved prefix and empty query catalog together. IDs allocated after the
+        // snapshot stay pending for the next checkpoint.
+        database.rebuild(&identities)?;
+        self.checkpointed(snapshot.into_iter().map(|(name, keys)| (name, keys.len())));
+        Ok(())
+    }
+
     /// Write pending assignments while the operation is drained. A failed commit leaves saved
     /// lengths untouched; the next successful checkpoint can write the same assignments again.
     pub(crate) fn write_pending(&self, write: &Write<'_>) -> Result<Vec<(String, usize)>> {
@@ -155,7 +205,7 @@ impl Interner {
         Ok(saved)
     }
 
-    pub(crate) fn checkpointed(&self, saved: Vec<(String, usize)>) {
+    pub(crate) fn checkpointed(&self, saved: impl IntoIterator<Item = (String, usize)>) {
         let mut state = self.state.lock().expect("interner state");
         for (name, count) in saved {
             state

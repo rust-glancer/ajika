@@ -8,7 +8,6 @@
 use std::{
     cmp::Reverse,
     collections::BTreeMap,
-    fs::File,
     io::{BufReader, Read, Seek, SeekFrom},
     sync::atomic::Ordering,
     time::Instant,
@@ -20,7 +19,6 @@ use crate::{
     Database, Error, Result, Write,
     error::ensure,
     format::{self, FrameHeader, Location, PACKS, PackHeader, PackInfo, VALUES},
-    pack::PackWriter,
 };
 
 pub(crate) const PASS_BYTES: u64 = 16 * 1024 * 1024;
@@ -32,8 +30,11 @@ impl Database {
     /// Run one small reclamation pass between operations if needed. A single large value can
     /// make the pass exceed its usual work budget.
     pub fn maintain(&self) -> Result<()> {
-        if self.maintenance_due.swap(false, Ordering::Relaxed) {
-            self.compact_step(false)?;
+        if self.maintenance_due.swap(false, Ordering::Relaxed)
+            && let Err(error) = self.compact_step(false)
+        {
+            self.maintenance_due.store(true, Ordering::Relaxed);
+            return Err(error.at(&self.root));
         }
         Ok(())
     }
@@ -113,7 +114,7 @@ impl Database {
         let mut moved = 0;
         let mut retired = 0;
         for (id, info) in candidates {
-            let mut source = BufReader::new(File::open(PackWriter::path(&self.packs, &id))?);
+            let mut source = BufReader::new(self.open_pack(&id)?);
             let mut offset = info.scan_offset;
             source.seek(SeekFrom::Start(offset))?;
             while offset < info.length && scanned < PASS_BYTES && frames < PASS_FRAMES {

@@ -56,9 +56,8 @@ following operation fails. The host can restore its accepted view or install a
 new candidate before trying again.
 
 Returning an error from the `run` callback abandons pending derived work before
-checkpointing. A late cancellation or maintenance error can still occur
-after cache data was committed. A failed `run` therefore does not mean “the
-storage directory is unchanged.”
+checkpointing. A late cancellation can still return an error after cache data
+was committed. Automatic maintenance failures are logged separately.
 
 This is safe for reusable derived work because later requests validate it against
 their inputs. Publishing an editor response or accepting a project generation

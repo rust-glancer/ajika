@@ -97,3 +97,84 @@ fn declarations_have_independent_numbering() -> Result<()> {
     assert_eq!(Symbol::from_raw(symbol.as_raw()), symbol);
     Ok(())
 }
+
+#[ajika::query]
+fn packed_value(_cx: &Db, byte: u8) -> ajika::Result<Vec<u8>> {
+    Ok(vec![byte; 4096])
+}
+
+#[test]
+fn cache_recovery_keeps_identity_assignments() -> Result<()> {
+    for recovery in ["next run", "invalidate", "restart"] {
+        let root = tempfile::tempdir()?;
+        let mut db = Database::open(root.path(), "test", inputs(""), (), retention())?;
+        db.set_compression(ajika::Compression::None);
+        let saved = db.run(|cx| {
+            packed_value(cx, 42)?;
+            file_id(cx, "saved.rs".into())
+        })?;
+        let interner = db.interner();
+
+        let pack = std::fs::read_dir(root.path().join("packs"))?
+            .next()
+            .expect("one packed value")?
+            .path();
+        std::fs::OpenOptions::new()
+            .write(true)
+            .open(pack)?
+            .set_len(40)?;
+
+        let pending = if recovery == "restart" {
+            drop(db);
+            db = Database::open(root.path(), "test", inputs(""), (), retention())?;
+            None
+        } else {
+            let pending = File::new(&interner, "pending.rs".into())?;
+            let mut calls = 0;
+            db.run(|cx| {
+                calls += 1;
+                packed_value(cx, 42)
+            })
+            .expect_err("the original request sees the damaged value");
+            assert_eq!(calls, 1);
+            if recovery == "invalidate" {
+                // Unix lets us remove the backing index while the owner still holds it open.
+                #[cfg(unix)]
+                std::fs::remove_file(root.path().join("index.redb"))?;
+                db.invalidate()?;
+                assert_eq!(pending.path(&db.interner())?, "pending.rs");
+                drop(db);
+                db = Database::open(root.path(), "test", inputs(""), (), retention())?;
+                assert_eq!(pending.path(&db.interner())?, "pending.rs");
+            }
+            Some(pending)
+        };
+        assert_eq!(db.run(|cx| packed_value(cx, 42))?.as_slice(), &[42; 4096]);
+        assert_eq!(db.statistics().executed, 1, "{recovery} rebuilt the value");
+        assert_eq!(saved.path(&db.interner())?, "saved.rs");
+        if let Some(pending) = pending {
+            assert_eq!(pending.path(&db.interner())?, "pending.rs");
+            assert_eq!(pending.path(&interner)?, "pending.rs");
+            drop(db);
+            let db = Database::open(root.path(), "test", inputs(""), (), retention())?;
+            assert_eq!(pending.path(&db.interner())?, "pending.rs");
+        }
+    }
+    Ok(())
+}
+
+#[test]
+fn an_aborted_pack_write_keeps_the_warm_checkpoint() -> Result<()> {
+    let root = tempfile::tempdir()?;
+    let mut db = Database::open(root.path(), "test", inputs(""), (), retention())?;
+    let saved = db.run(|cx| file_id(cx, "saved.rs".into()))?;
+    std::fs::remove_dir(root.path().join("packs"))?;
+    db.run(|cx| packed_value(cx, 42))
+        .expect_err("a pack needs a writable directory");
+    std::fs::create_dir(root.path().join("packs"))?;
+
+    assert_eq!(db.run(|cx| file_id(cx, "saved.rs".into()))?, saved);
+    assert_eq!(db.statistics().executed, 0, "the saved answer stayed warm");
+    assert_eq!(db.run(|cx| packed_value(cx, 42))?.as_slice(), &[42; 4096]);
+    Ok(())
+}

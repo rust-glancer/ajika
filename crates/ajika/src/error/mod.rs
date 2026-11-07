@@ -66,13 +66,10 @@ enum PersistenceRepr {
         #[source]
         source: Option<BoxError>,
     },
-    #[error("{0}")]
-    Unavailable(String),
 }
 
 /// A failure accessing Ajika's saved work. A query record that cannot be decoded and
-/// a damaged storage frame both report [`PersistenceErrorKind::InvalidCache`]. Use
-/// [`Error::requires_reopen`] to decide whether the owner can still serve queries.
+/// a damaged storage frame both report [`PersistenceErrorKind::InvalidCache`].
 #[derive(Debug, thiserror::Error)]
 #[error(transparent)]
 pub struct PersistenceError(PersistenceRepr);
@@ -82,7 +79,6 @@ impl PersistenceError {
         match &self.0 {
             PersistenceRepr::Storage(error) => error.kind(),
             PersistenceRepr::InvalidCache { .. } => PersistenceErrorKind::InvalidCache,
-            PersistenceRepr::Unavailable(_) => PersistenceErrorKind::Unavailable,
         }
     }
 
@@ -103,7 +99,6 @@ impl PersistenceError {
     fn requires_reopen(&self) -> bool {
         match &self.0 {
             PersistenceRepr::Storage(error) => error.requires_reopen(),
-            PersistenceRepr::Unavailable(_) => true,
             _ => false,
         }
     }
@@ -246,8 +241,8 @@ impl Error {
         }
     }
 
-    /// Whether the database needs recovery before serving more queries. A failed checkpoint
-    /// can leave the owner unusable even when a healthy read could return the same I/O cause.
+    /// Whether the failure called for cache recovery. The next [`Database::run`](crate::Database::run)
+    /// attempts recovery on the same database before starting the callback.
     pub fn requires_reopen(&self) -> bool {
         self.reopen
     }
@@ -286,10 +281,8 @@ impl Error {
         })
     }
 
-    pub(crate) fn unavailable_storage(message: impl Into<String>) -> Self {
-        Self::from(PersistenceError(PersistenceRepr::Unavailable(
-            message.into(),
-        )))
+    pub(crate) fn is_invalid_cache(&self) -> bool {
+        matches!(self.kind(), ErrorKind::Persistence(error) if error.kind() == PersistenceErrorKind::InvalidCache)
     }
 
     pub(crate) fn unexpected(source: impl StdError + Send + Sync + 'static) -> Self {

@@ -18,7 +18,7 @@ mod transaction;
 mod value;
 
 pub use self::{
-    database::{Database, Options},
+    database::{Database, Identity, Options},
     error::{Error, ErrorKind, Result},
     statistics::Statistics,
     transaction::{Read, Write},

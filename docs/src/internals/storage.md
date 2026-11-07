@@ -131,9 +131,10 @@ cache together before handing either out.
 
 ## Rebuildable, with explicit boundaries
 
-Epoch mismatches and unreadable backing can cause a cache reset while the owner
-lock remains held. This does not mean every malformed runtime value is silently
-repaired: decode or validation errors can still fail an operation.
+Startup and live recovery keep the owner lock while reopening or replacing the
+index. An epoch change or confirmed corruption can discard query records and
+packs. Ajika keeps the live interner during recovery and validates its assignments
+against a recovered checkpoint before reusing query data.
 
 The format is for application-owned, throwaway cache data, not hostile input or
 authoritative user documents. Recovery aims to retain a coherent checkpoint or

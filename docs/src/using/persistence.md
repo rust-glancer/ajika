@@ -81,9 +81,21 @@ query implementation, key encoding, or result schema makes old stored work unsaf
 to reuse. Ajika tracks input changes; it cannot discover that you edited a function's
 Rust code. A different epoch discards the old cache on opening rather than migrating it.
 
-An in-process `database.invalidate()` discards retained query work while keeping
-the installed inputs and identity assignments. A full cache reset has a wider
-lifecycle; read [interning](interning.md) before keeping IDs outside the database.
+## Recovering a cache
+
+`open` and live recovery try to retain a usable checkpoint. Confirmed corruption
+can cause Ajika to discard query data and log a warning. Opening a compatible
+cache preserves readable saved identities. If the identity table is lost, opening
+starts with a fresh interner.
+
+If a request discovers corruption or encounters an uncertain commit, it returns
+the failure. The next `run` repairs the cache before invoking the callback, using
+the same inputs and live interner. If the disk stays unavailable, `run` returns a
+storage error.
+
+Use `database.invalidate()` to explicitly discard query work. It can rebuild a
+damaged cache while preserving the live interner. `collect` and `compact` report
+storage failures so their work stays limited to reclamation.
 
 ## A checkpoint is not application acceptance
 
@@ -91,7 +103,6 @@ The host should reject incoherent input capture before returning successfully fr
 `run`. Ajika can then abandon the operation's new query results.
 
 The host still owns publication of an editor response or project generation.
-Cancellation or maintenance can fail after a checkpoint has committed, so an error
-from `run` is not a promise that the cache directory is unchanged. Stored results
+Cancellation can arrive after a checkpoint has committed. Stored results
 remain associated with the observations they actually used. See
 [`Database::run`](https://github.com/rust-glancer/ajika/blob/main/crates/ajika/src/runtime/mod.rs#L238) and [checkpointing](../internals/checkpoints.md).

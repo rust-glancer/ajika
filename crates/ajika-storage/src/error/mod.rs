@@ -169,9 +169,10 @@ impl Error {
     pub(crate) fn at(mut self, path: impl Into<PathBuf>) -> Self {
         // Errors are shared only after publication to callers; constructing filesystem context
         // does not clone an underlying OS error or discard its raw error code.
-        Arc::get_mut(&mut self.inner)
-            .expect("unshared error context")
-            .path = Some(path.into());
+        let details = Arc::get_mut(&mut self.inner).expect("unshared error context");
+        if details.path.is_none() {
+            details.path = Some(path.into());
+        }
         self
     }
 
@@ -220,7 +221,8 @@ impl From<redb::Error> for Error {
         // than exposing a different public variant for every index API.
         match source {
             redb::Error::DatabaseAlreadyOpen => Self::in_use(),
-            redb::Error::Io(source) => source.into(),
+            // Unlike a pack I/O failure, an index I/O error can latch the redb handle.
+            redb::Error::Io(source) => Self::from(source).require_reopen(),
             source @ (redb::Error::Corrupted(_)
             | redb::Error::UpgradeRequired(_)
             | redb::Error::TableTypeMismatch { .. }
@@ -228,7 +230,6 @@ impl From<redb::Error> for Error {
             | redb::Error::TableDoesNotExist(_)) => Self::invalid_source(source),
             source @ (redb::Error::PreviousIo
             | redb::Error::DatabaseClosed
-            | redb::Error::TransactionPoisoned
             | redb::Error::LockPoisoned(_)) => Self::new(
                 ErrorKind::Unavailable,
                 Cause::Source {

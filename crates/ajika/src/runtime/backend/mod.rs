@@ -8,10 +8,11 @@
 
 use std::{
     collections::{BTreeMap, HashMap, HashSet},
+    error::Error as _,
     path::Path,
     sync::{
-        Arc, Mutex,
-        atomic::{AtomicBool, AtomicU64, Ordering},
+        Arc, Mutex, OnceLock,
+        atomic::{AtomicU64, Ordering},
     },
     time::{Duration, SystemTime, UNIX_EPOCH},
 };
@@ -69,9 +70,8 @@ pub(crate) struct Backend {
     store: Store,
     // Small retention inventory. Loading this does not populate the runtime's query memos.
     usage: Mutex<HashMap<Id, Usage>>,
-    // A failed storage update can leave its outcome uncertain. Do not serve more queries from
-    // this backend until the host reopens it or successfully discards its contents.
-    usable: AtomicBool,
+    // Workers can discover damage, but repair must wait until they release their read views.
+    recovery: OnceLock<Error>,
     bytes: AtomicU64,
 }
 
@@ -82,7 +82,7 @@ impl Backend {
             store: Store::Memory(Mutex::default()),
             session: Mutex::default(),
             usage: Mutex::default(),
-            usable: AtomicBool::new(true),
+            recovery: OnceLock::new(),
             bytes: AtomicU64::new(0),
         }
     }
@@ -97,10 +97,37 @@ impl Backend {
             &format!("query-runtime-3:{epoch}"),
             Options::default(),
         )?;
-        let mut assignments = database.snapshot()?.identities()?;
-        // IDs cannot be recycled while live callers or saved values can still name them.
-        // Bound historical names at reopen, before handing out either kind of handle. Reset
-        // their referring queries in the same transaction; an individual row is never expired.
+        let interner = match Self::load_interner(&mut database) {
+            Ok(interner) => interner,
+            Err(error) if error.is_invalid_cache() => {
+                database.rebuild(&[])?;
+                tracing::warn!(
+                    %error,
+                    cause = error.source().map(tracing::field::display),
+                    path = %database.path().display(),
+                    identities_discarded = true,
+                    "discarded corrupt cache contents"
+                );
+                crate::Interner::default()
+            }
+            Err(error) => return Err(error),
+        };
+        let usage = Self::restore_usage(&mut database, &interner, Ok(()))?;
+        let bytes = usage.values().map(|item| item.bytes).sum();
+        Ok(Self {
+            interner,
+            store: Store::Disk(database),
+            session: Mutex::default(),
+            usage: Mutex::new(usage),
+            recovery: OnceLock::new(),
+            bytes: AtomicU64::new(bytes),
+        })
+    }
+
+    fn load_interner(database: &mut StorageDatabase) -> Result<crate::Interner> {
+        let assignments = database.snapshot()?.identities()?;
+        // This bound applies before publishing the first interner. Live recovery cannot
+        // recycle IDs even if the interner has grown past this startup limit.
         const MAX_INTERNER_BYTES: usize = 32 * 1024 * 1024;
         if assignments
             .iter()
@@ -109,9 +136,33 @@ impl Backend {
             > MAX_INTERNER_BYTES
         {
             database.invalidate(true)?;
-            assignments.clear();
+            return Ok(crate::Interner::default());
         }
-        let interner = crate::Interner::load(assignments)?;
+        crate::Interner::load(assignments)
+    }
+
+    fn restore_usage(
+        database: &mut StorageDatabase,
+        interner: &crate::Interner,
+        loaded: Result<()>,
+    ) -> Result<HashMap<Id, Usage>> {
+        match loaded.and_then(|()| Self::load_usage(database)) {
+            Err(error) if error.is_invalid_cache() => {
+                interner.rebuild(database)?;
+                tracing::warn!(
+                    %error,
+                    cause = error.source().map(tracing::field::display),
+                    path = %database.path().display(),
+                    identities_discarded = false,
+                    "discarded corrupt cache contents"
+                );
+                Ok(HashMap::new())
+            }
+            result => result,
+        }
+    }
+
+    fn load_usage(database: &StorageDatabase) -> Result<HashMap<Id, Usage>> {
         let mut usage = HashMap::new();
         // Restart needs sizes and last-use times to enforce retention. Decode each record
         // only long enough to extract those fields; dependency lists are not retained here,
@@ -127,15 +178,44 @@ impl Backend {
                 },
             );
         }
-        let bytes = usage.values().map(|item| item.bytes).sum();
-        Ok(Self {
-            interner,
-            store: Store::Disk(database),
-            session: Mutex::default(),
-            usage: Mutex::new(usage),
-            usable: AtomicBool::new(true),
-            bytes: AtomicU64::new(bytes),
-        })
+        Ok(usage)
+    }
+
+    pub(crate) fn recover(&mut self) -> Result<()> {
+        let Some(reason) = self.recovery.get().cloned() else {
+            return Ok(());
+        };
+        let Store::Disk(database) = &mut self.store else {
+            unreachable!("recovery belongs to disk storage")
+        };
+        let loaded = if reason.requires_reopen() {
+            (|| {
+                database.reopen()?;
+                self.interner.reconcile(&database.snapshot()?.identities()?)
+            })()
+        } else {
+            Err(reason)
+        };
+        match Self::restore_usage(database, &self.interner, loaded) {
+            Ok(usage) => {
+                self.replace_usage(usage);
+                self.recovery.take();
+                Ok(())
+            }
+            // Keep the original repair decision across temporary I/O failures.
+            Err(error) => Err(error.require_reopen()),
+        }
+    }
+
+    fn replace_usage(&mut self, usage: HashMap<Id, Usage>) {
+        // Session records can borrow payloads from the prior disk catalog. Drop them with
+        // the old revision proofs even if reopening retained most of that checkpoint.
+        self.session.get_mut().expect("session storage").clear();
+        self.bytes.store(
+            usage.values().map(|item| item.bytes).sum(),
+            Ordering::Relaxed,
+        );
+        *self.usage.get_mut().expect("storage usage") = usage;
     }
 
     /// A last-use time that can be saved and compared after restarting. Process-local
@@ -156,21 +236,32 @@ impl Backend {
     }
 
     pub(crate) fn storage_statistics(&self) -> Result<Option<crate::StorageStatistics>> {
+        self.check()?;
         match &self.store {
             Store::Memory(_) => Ok(None),
-            Store::Disk(database) => Ok(Some(database.statistics()?)),
+            Store::Disk(database) => {
+                self.observe(database.statistics().map(Some).map_err(Error::from))
+            }
         }
     }
 
-    /// Stop further reuse after a failed storage-changing operation. This checks the backend's
-    /// health, separately from cancellation or failure of one query operation.
     pub(crate) fn check(&self) -> Result<()> {
-        if !self.usable.load(Ordering::Acquire) {
-            return Err(Error::unavailable_storage(
-                "reopen query storage after its failed write",
-            ));
-        }
-        Ok(())
+        self.recovery
+            .get()
+            .map_or(Ok(()), |error| Err(error.clone()))
+    }
+
+    /// Record failures at the storage boundary so a callback returning its own error cannot
+    /// hide a repair need. Ordinary failures leave the last committed checkpoint usable.
+    pub(crate) fn observe<T>(&self, result: Result<T>) -> Result<T> {
+        result.map_err(|error| {
+            if self.is_disk() && (error.is_invalid_cache() || error.requires_reopen()) {
+                let _ = self.recovery.set(error.clone());
+                error.require_reopen()
+            } else {
+                error
+            }
+        })
     }
 
     /// Load only the output metadata into a known-valid call's working memo. Disk storage
@@ -190,14 +281,16 @@ impl Backend {
                     .map(|stored| stored.record.header.clone()),
                 false,
             )),
-            Store::Disk(database) => Ok((
-                database
-                    .snapshot()?
-                    .metadata(id)?
-                    .map(|bytes| codec::decode_prefix(&bytes))
-                    .transpose()?,
-                true,
-            )),
+            Store::Disk(database) => self.observe((|| {
+                Ok((
+                    database
+                        .snapshot()?
+                        .metadata(id)?
+                        .map(|bytes| codec::decode_prefix(&bytes))
+                        .transpose()?,
+                    true,
+                ))
+            })()),
         }
     }
 
@@ -220,11 +313,13 @@ impl Backend {
                 .expect("memory storage")
                 .get(id)
                 .map(|stored| stored.record.clone())),
-            Store::Disk(database) => database
-                .snapshot()?
-                .metadata(id)?
-                .map(|bytes| codec::decode(&bytes).map(Arc::new))
-                .transpose(),
+            Store::Disk(database) => self.observe((|| {
+                database
+                    .snapshot()?
+                    .metadata(id)?
+                    .map(|bytes| codec::decode(&bytes).map(Arc::new))
+                    .transpose()
+            })()),
         }
     }
 
@@ -271,11 +366,14 @@ impl Backend {
                     return Ok(None);
                 };
                 check()?;
-                let bytes = database
-                    .snapshot()?
-                    .read_value(&address.value_id(slot), length)?;
+                let bytes = self.observe(
+                    database
+                        .snapshot()
+                        .and_then(|read| read.read_value(&address.value_id(slot), length))
+                        .map_err(Error::from),
+                )?;
                 check()?;
-                let data = (codec.decode)(&bytes)?;
+                let data = self.observe((codec.decode)(&bytes))?;
                 check()?;
                 Ok(Some((
                     Value {
@@ -564,14 +662,7 @@ impl Backend {
             }
             Ok(())
         })();
-        result.map_err(|error| {
-            if !error.is_cancelled() && !error.is_capacity() {
-                self.usable.store(false, Ordering::Release);
-                error.require_reopen()
-            } else {
-                error
-            }
-        })
+        self.observe(result)
     }
 
     pub(crate) fn session_usage(&self) -> (u64, u64) {
@@ -670,10 +761,7 @@ impl Backend {
             }
             Ok(())
         })();
-        if let Err(error) = result {
-            self.usable.store(false, Ordering::Release);
-            return Err(error.require_reopen());
-        }
+        self.observe(result)?;
         // Stored removals succeeded. A failed pass must not advance this bookkeeping as if
         // its removals had been saved, so update the in-memory inventory only afterward.
         {
@@ -693,35 +781,45 @@ impl Backend {
     /// Discard all retained query work and reset its accounting. Captured inputs and interned
     /// identities stay intact, so later queries can recompute from the same observations.
     pub(crate) fn invalidate(&mut self) -> Result<()> {
-        self.session.get_mut().expect("session storage").clear();
-        match &mut self.store {
-            Store::Memory(store) => *store.get_mut().expect("memory storage") = HashMap::new(),
-            Store::Disk(database) => database.invalidate(false)?,
-        }
-        *self.usage.get_mut().expect("storage usage") = HashMap::new();
-        self.bytes.store(0, Ordering::Relaxed);
-        self.usable.store(true, Ordering::Release);
+        let result = match &mut self.store {
+            Store::Memory(store) => {
+                *store.get_mut().expect("memory storage") = HashMap::new();
+                Ok(())
+            }
+            Store::Disk(database) if self.recovery.get().is_some() => {
+                self.interner.rebuild(database)
+            }
+            Store::Disk(database) => match database.invalidate(false) {
+                Err(error) if error.kind() == ajika_storage::ErrorKind::InvalidCache => {
+                    self.interner.rebuild(database)
+                }
+                result => result.map_err(Error::from),
+            },
+        };
+        self.observe(result)?;
+        self.recovery.take();
+        self.replace_usage(HashMap::new());
         Ok(())
     }
 
     /// Ask disk storage to reclaim physical file space after logical removals. Memory storage
     /// has no file to compact, and simply reports that no compaction happened.
     pub(crate) fn compact(&mut self) -> Result<bool> {
-        match &mut self.store {
+        self.check()?;
+        let result = match &mut self.store {
             Store::Memory(_) => Ok(false),
             Store::Disk(database) => database.compact().map_err(Error::from),
-        }
+        };
+        self.observe(result)
     }
 
     /// Storage relocation changes no logical query state. Run it outside the evaluator's
     /// working scope so there are no disk readers or query workers to coordinate with.
     pub(crate) fn maintain(&self) -> Result<()> {
-        if let Store::Disk(database) = &self.store
-            && let Err(error) = database.maintain()
-        {
-            self.usable.store(false, Ordering::Release);
-            return Err(Error::from(error).require_reopen());
+        self.check()?;
+        match &self.store {
+            Store::Memory(_) => Ok(()),
+            Store::Disk(database) => self.observe(database.maintain().map_err(Error::from)),
         }
-        Ok(())
     }
 }

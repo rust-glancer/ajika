@@ -52,9 +52,8 @@ impl<'a> Write<'a> {
             .access
             .try_write()
             .map_err(|_| Error::access_conflict("finish storage reads before starting a write"))?;
-        database.check()?;
         Ok(Self {
-            transaction: database.index.begin_write()?,
+            transaction: database.index()?.begin_write()?,
             database,
             packs: PackWriter::new(database.packs.clone(), database.instance, remaining),
             changed_packs: BTreeMap::new(),
@@ -167,21 +166,6 @@ impl<'a> Write<'a> {
         Ok(())
     }
 
-    pub(crate) fn clear(&mut self, reset_identities: bool) -> Result<()> {
-        self.transaction.delete_table(RECORDS)?;
-        self.transaction.delete_table(VALUES)?;
-        self.transaction.delete_table(PACKS)?;
-        self.changed_packs.clear();
-        if reset_identities {
-            self.transaction.delete_table(IDENTITIES)?;
-        }
-        drop(self.transaction.open_table(RECORDS)?);
-        drop(self.transaction.open_table(VALUES)?);
-        drop(self.transaction.open_table(PACKS)?);
-        drop(self.transaction.open_table(IDENTITIES)?);
-        Ok(())
-    }
-
     /// Publish the checkpoint atomically. If the outcome is uncertain, the returned error's
     /// [`requires_reopen`](Error::requires_reopen) method returns `true`.
     pub fn commit(mut self) -> Result<()> {
@@ -251,9 +235,8 @@ impl<'a> Read<'a> {
         let guard = database.access.try_read().map_err(|_| {
             Error::access_conflict("finish the storage write before starting a read")
         })?;
-        database.check()?;
         Ok(Self {
-            transaction: database.index.begin_read()?,
+            transaction: database.index()?.begin_read()?,
             database,
             _guard: guard,
         })
@@ -334,15 +317,7 @@ impl<'a> Read<'a> {
                     if let Some((_, file)) = files.iter().find(|(id, _)| id == &pack) {
                         file.clone()
                     } else {
-                        let path = PackWriter::path(&self.database.packs, &pack);
-                        let file = Arc::new(File::open(&path).map_err(|source| {
-                            let error = if source.kind() == io::ErrorKind::NotFound {
-                                Error::invalid_source(source)
-                            } else {
-                                Error::from(source)
-                            };
-                            error.at(path)
-                        })?);
+                        let file = Arc::new(self.database.open_pack(&pack)?);
                         if files.len() == 16 {
                             files.remove(0);
                         }
