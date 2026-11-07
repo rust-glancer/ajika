@@ -143,10 +143,14 @@ fn cache_recovery_keeps_identity_assignments() -> Result<()> {
             .expect_err("the original request sees the damaged value");
             assert_eq!(calls, 1);
             assert!(db.recovery_pending());
+            #[cfg(unix)]
+            {
+                // The old handle stays open on the detached inode during live repair.
+                let index = root.path().join("index.redb");
+                std::fs::rename(&index, root.path().join("previous.redb"))?;
+                std::fs::File::create(index)?;
+            }
             if recovery == "invalidate" {
-                // Unix lets us remove the backing index while the owner still holds it open.
-                #[cfg(unix)]
-                std::fs::remove_file(root.path().join("index.redb"))?;
                 db.invalidate()?;
                 assert!(!db.recovery_pending());
                 assert_eq!(pending.path(&db.interner())?, "pending.rs");

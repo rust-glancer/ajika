@@ -327,22 +327,7 @@ impl Database {
     }
 
     fn reset(&mut self, identities: Option<&[Identity<'_>]>) -> Result<()> {
-        // A reset needs the index, but it can discard pack references without reading them.
-        let clear = if self.healthy.load(Ordering::Acquire) {
-            match self.clear_index(identities) {
-                Err(error)
-                    if error.requires_reopen() && error.kind() != ErrorKind::InvalidCache =>
-                {
-                    self.load_index(false)
-                        .and_then(|()| self.clear_index(identities))
-                }
-                result => result,
-            }
-        } else {
-            self.load_index(false)
-                .and_then(|()| self.clear_index(identities))
-        };
-        match (clear, identities) {
+        match (self.clear_index(identities), identities) {
             (Ok(()), _) => {}
             (Err(error), Some(identities)) if error.kind() == ErrorKind::InvalidCache => {
                 self.replace_index(identities)?;
@@ -352,12 +337,14 @@ impl Database {
         self.finish_open()
     }
 
-    fn clear_index(&self, identities: Option<&[Identity<'_>]>) -> Result<()> {
-        self.healthy.store(false, Ordering::Release);
-        ensure!(
-            self.root.join(INDEX_FILE).try_exists()?,
-            Error::invalid_cache("missing index file"),
-        );
+    fn clear_index(&mut self, identities: Option<&[Identity<'_>]>) -> Result<()> {
+        // On Unix, a cleanup tool can replace `index.redb` with an empty file while Ajika
+        // still has the original open. A rebuild through that handle can report success
+        // while saving IDs to the old file. On restart, Ajika would open the empty index.
+        // Reopen `index.redb` under the directory lock so the reset targets the file a
+        // restart will read. Loading the index is enough because clearing the catalog
+        // drops every pack reference, even when the packs are damaged.
+        self.load_index(false)?;
         let index = self.index.as_ref().expect("loaded index");
         let write = index.begin_write()?;
         Self::clear_catalog(&write, identities)?;

@@ -378,13 +378,14 @@ fn rebuilding_an_empty_index_restores_supplied_identities() -> Result<()> {
     // Move the old inode aside so closing its redb handle cannot change the empty file.
     std::fs::rename(&index, root.path().join("previous.redb"))?;
     std::fs::File::create(index)?;
-    database.reopen().expect_err("the existing index is empty");
 
     database.rebuild(&[crate::Identity {
         namespace: "files",
         id: 0,
         key: b"src/lib.rs",
     }])?;
+    drop(database);
+    let database = Database::open(root.path(), "fixture", Options::default())?;
     assert_eq!(
         database.snapshot()?.identities()?,
         vec![("files".into(), 0, b"src/lib.rs".to_vec())]
