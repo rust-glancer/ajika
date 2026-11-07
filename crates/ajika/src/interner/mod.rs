@@ -13,7 +13,7 @@ use std::{
 
 use ajika_storage::Write;
 
-use crate::{Error, Persist, Result, UnavailableData, codec};
+use crate::{Error, Persist, Result, UnavailableData, codec, error::ensure};
 
 /// A database's shared interner for immutable objects.
 ///
@@ -123,9 +123,10 @@ impl Interner {
     pub(crate) fn load(rows: Vec<(String, u32, Vec<u8>)>) -> Result<Self> {
         let interner = Self::default();
         for (namespace, expected, key) in rows {
-            if interner.intern(namespace, &key)? != expected {
-                return Err(Error::invalid_cache("invalid identity sequence"));
-            }
+            ensure!(
+                interner.intern(namespace, &key)? == expected,
+                Error::invalid_cache("invalid identity sequence"),
+            );
         }
         for entries in interner
             .state

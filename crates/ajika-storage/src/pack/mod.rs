@@ -13,6 +13,7 @@ use std::{
 
 use crate::{
     EncodedValue, Error, Id, Result,
+    error::ensure,
     format::{self, FrameHeader, Location, PackHeader, PackId},
 };
 
@@ -86,9 +87,10 @@ impl PackWriter {
             writer.write_all(&buffer[..length])?;
             remaining -= length as u64;
         }
-        if hash.finalize().as_bytes() != &expected {
-            return Err(Error::invalid_cache("invalid stored value checksum"));
-        }
+        ensure!(
+            hash.finalize().as_bytes() == &expected,
+            Error::invalid_cache("invalid stored value checksum"),
+        );
         self.failed = false;
         Ok(location)
     }

@@ -15,7 +15,9 @@ use super::{
     record::{Address, Dependency, Record, RecordHeader, Slot, ValueRecord},
     value::{Codec, Value},
 };
-use crate::{Durability, Error, Input, Lifetime, Persist, Query, Result, UnavailableData};
+use crate::{
+    Durability, Error, Input, Lifetime, Persist, Query, Result, UnavailableData, error::ensure,
+};
 
 impl<S: Send + Sync + 'static> Db<'_, S> {
     /// Ask query Q for the answer to `key` under this operation's captured inputs.
@@ -105,9 +107,10 @@ impl<S: Send + Sync + 'static> Db<'_, S> {
                 codec: Some(Codec::of::<T>()),
             };
             let mut reads = frame.reads.lock().expect("query outputs");
-            if reads.outputs.insert(Some(slot.clone()), value).is_some() {
-                return Err(Error::contract("query emitted an output slot twice"));
-            }
+            ensure!(
+                reads.outputs.insert(Some(slot.clone()), value).is_none(),
+                Error::contract("query emitted an output slot twice"),
+            );
             Ok(Output::new(producer, slot))
         })
     }
@@ -123,11 +126,10 @@ impl<S: Send + Sync + 'static> Db<'_, S> {
     ) -> Result<Arc<T>> {
         self.handle(|| {
             self.check_cancelled()?;
-            if self.frame.owner.as_ref() == Some(address) {
-                return Err(Error::contract(
-                    "query cannot read its own output while executing",
-                ));
-            }
+            ensure!(
+                self.frame.owner.as_ref() != Some(address),
+                Error::contract("query cannot read its own output while executing"),
+            );
             if let Some(value) = self.frame.acquired(address, slot)? {
                 if tracing::enabled!(target: diagnostics::TARGET, tracing::Level::TRACE) {
                     self.operation.diagnostic_reuse(

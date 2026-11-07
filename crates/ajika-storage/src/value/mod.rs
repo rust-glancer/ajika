@@ -8,7 +8,7 @@ use std::io::{Read, Write};
 
 use wincode::{SchemaRead, SchemaWrite};
 
-use crate::{Error, Result};
+use crate::{Error, Result, error::ensure};
 
 pub(crate) const INLINE_BYTES: usize = 1024;
 
@@ -59,9 +59,10 @@ impl Compression {
     /// The stored checksum is checked by the reader before it reaches this function.
     pub(crate) fn decode(self, bytes: Vec<u8>, raw_length: u64) -> Result<Vec<u8>> {
         if self == Self::None {
-            if bytes.len() as u64 != raw_length {
-                return Err(Error::invalid_cache("invalid raw value length"));
-            }
+            ensure!(
+                bytes.len() as u64 == raw_length,
+                Error::invalid_cache("invalid raw value length"),
+            );
             return Ok(bytes);
         }
         let mut result =
@@ -85,9 +86,10 @@ impl Compression {
                     .map_err(Error::invalid_source)?;
             }
         }
-        if result.len() as u64 != raw_length {
-            return Err(Error::invalid_cache("invalid decoded value length"));
-        }
+        ensure!(
+            result.len() as u64 == raw_length,
+            Error::invalid_cache("invalid decoded value length"),
+        );
         Ok(result)
     }
 }

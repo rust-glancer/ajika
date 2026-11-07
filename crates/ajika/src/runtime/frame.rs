@@ -16,7 +16,7 @@ use super::{
     record::{Address, Dependency, Slot},
     value::{Data, Value},
 };
-use crate::{Durability, Error, Lifetime, Query, Result, Statistics};
+use crate::{Durability, Error, Lifetime, Query, Result, Statistics, error::ensure};
 
 /// The temporary log for one execution of a query function.
 ///
@@ -204,9 +204,10 @@ impl Reads {
         // Outputs emitted directly by callbacks belong to the same producer. Their slots must
         // be unique across branches too; nested queries keep their outputs in their own frames.
         for (slot, value) in branch.outputs {
-            if self.outputs.insert(slot, value).is_some() {
-                return Err(Error::contract("query emitted an output slot twice"));
-            }
+            ensure!(
+                self.outputs.insert(slot, value).is_none(),
+                Error::contract("query emitted an output slot twice"),
+            );
         }
         Ok(())
     }

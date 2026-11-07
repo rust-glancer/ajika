@@ -7,6 +7,17 @@ use std::{
     sync::Arc,
 };
 
+/// Return the supplied error when a required condition fails.
+macro_rules! ensure {
+    ($condition:expr, $error:expr $(,)?) => {
+        if !($condition) {
+            return Err($error);
+        }
+    };
+}
+
+pub(crate) use ensure;
+
 pub type Result<T> = std::result::Result<T, Error>;
 type BoxError = Box<dyn StdError + Send + Sync>;
 

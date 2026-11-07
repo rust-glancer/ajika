@@ -19,6 +19,7 @@ use redb::{ReadableDatabase, ReadableTable};
 
 use crate::{
     Compression, Error, ErrorKind, Read, Result, Statistics, Write,
+    error::ensure,
     format::{self, HEADER, IDENTITIES, PACKS, PackHeader, PackId, PackInfo, RECORDS, VALUES},
     pack::PackWriter,
 };
@@ -172,17 +173,18 @@ impl Database {
         for entry in read.open_table(PACKS)?.iter()? {
             let (id, bytes) = entry?;
             let info: PackInfo = format::decode(bytes.value())?;
-            if info.length < PackHeader::LENGTH
-                || info.live_bytes > info.length - PackHeader::LENGTH
-                || info.live_values == 0
-                || !(PackHeader::LENGTH..info.length).contains(&info.scan_offset)
-            {
-                return Err(Error::invalid_cache("invalid pack inventory"));
-            }
+            ensure!(
+                info.length >= PackHeader::LENGTH
+                    && info.live_bytes <= info.length - PackHeader::LENGTH
+                    && info.live_values > 0
+                    && (PackHeader::LENGTH..info.length).contains(&info.scan_offset),
+                Error::invalid_cache("invalid pack inventory"),
+            );
             let mut file = File::open(PackWriter::path(&path.join("packs"), id.value()))?;
-            if file.metadata()?.len() != info.length {
-                return Err(Error::invalid_cache("invalid pack file length"));
-            }
+            ensure!(
+                file.metadata()?.len() == info.length,
+                Error::invalid_cache("invalid pack file length"),
+            );
             let mut bytes = [0; PackHeader::LENGTH as usize];
             std::io::Read::read_exact(&mut file, &mut bytes)?;
             let header: PackHeader = format::decode(&bytes)?;
@@ -191,9 +193,10 @@ impl Database {
                 instance,
                 pack: *id.value(),
             };
-            if header != expected_header {
-                return Err(Error::invalid_cache("invalid pack identity"));
-            }
+            ensure!(
+                header == expected_header,
+                Error::invalid_cache("invalid pack identity"),
+            );
         }
         drop(read);
         PackWriter::sync_directory(path)?;

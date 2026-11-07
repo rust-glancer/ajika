@@ -17,6 +17,7 @@ use redb::{ReadableDatabase, ReadableTable};
 
 use crate::{
     Database, EncodedValue, Error, Id, Result,
+    error::ensure,
     format::{
         self, FrameHeader, IDENTITIES, Location, PACKS, PackHeader, PackId, PackInfo, RECORDS,
         VALUES,
@@ -296,9 +297,10 @@ impl<'a> Read<'a> {
         };
         match location {
             Location::Inline(bytes) => {
-                if bytes.len() as u64 != length {
-                    return Err(Error::invalid_cache("invalid inline value length"));
-                }
+                ensure!(
+                    bytes.len() as u64 == length,
+                    Error::invalid_cache("invalid inline value length"),
+                );
                 Ok(bytes)
             }
             Location::Pack {
@@ -306,9 +308,10 @@ impl<'a> Read<'a> {
                 offset,
                 header,
             } => {
-                if &header.id != id || header.raw_length != length {
-                    return Err(Error::invalid_cache("invalid value identity or length"));
-                }
+                ensure!(
+                    &header.id == id && header.raw_length == length,
+                    Error::invalid_cache("invalid value identity or length"),
+                );
                 let table = self.transaction.open_table(PACKS)?;
                 let info: PackInfo = format::decode(
                     table
@@ -319,9 +322,10 @@ impl<'a> Read<'a> {
                 let end = offset
                     .checked_add(header.frame_length())
                     .ok_or_else(|| Error::invalid_cache("invalid pack range"))?;
-                if offset < PackHeader::LENGTH || end > info.length {
-                    return Err(Error::invalid_cache("invalid pack range"));
-                }
+                ensure!(
+                    offset >= PackHeader::LENGTH && end <= info.length,
+                    Error::invalid_cache("invalid pack range"),
+                );
                 let file = {
                     let mut files = self.database.files.lock().expect("pack handles");
                     if let Some((_, file)) = files.iter().find(|(id, _)| id == &pack) {
@@ -346,18 +350,20 @@ impl<'a> Read<'a> {
                 let mut framing = [0; FrameHeader::LENGTH as usize];
                 Self::read_exact_at(&file, &mut framing, offset)?;
                 let frame: FrameHeader = format::decode(&framing)?;
-                if frame != header {
-                    return Err(Error::invalid_cache("invalid stored frame header"));
-                }
+                ensure!(
+                    frame == header,
+                    Error::invalid_cache("invalid stored frame header"),
+                );
                 // Read the payload into its own allocation, avoiding a full-value memmove to
                 // remove a framing prefix before returning an uncompressed value.
                 let stored_length =
                     usize::try_from(header.stored_length).map_err(Error::invalid_source)?;
                 let mut bytes = vec![0; stored_length];
                 Self::read_exact_at(&file, &mut bytes, offset + FrameHeader::LENGTH)?;
-                if blake3::hash(&bytes).as_bytes() != &header.checksum {
-                    return Err(Error::invalid_cache("invalid stored value checksum"));
-                }
+                ensure!(
+                    blake3::hash(&bytes).as_bytes() == &header.checksum,
+                    Error::invalid_cache("invalid stored value checksum"),
+                );
                 header.compression.decode(bytes, length)
             }
         }

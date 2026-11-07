@@ -20,7 +20,7 @@ use std::{
 };
 
 use self::table::{ErasedTable, Table, Value};
-use crate::{Durability, Error, Lifetime, Persist, Result, Stamp, UnavailableData};
+use crate::{Durability, Error, Lifetime, Persist, Result, Stamp, UnavailableData, error::ensure};
 
 /// One field of a keyed input declaration. Prefer [`#[ajika::input]`](macro@crate::input), which
 /// generates this contract and typed getters/setters for each field of an ordinary struct.
@@ -206,12 +206,10 @@ impl Inputs {
                     Some(value) => {
                         let (new_key, new_value) = relocate(key, &value.value);
                         let new_value = Value::<T>::new(new_value)?;
-                        if new_key != *key || new_value.record != value.record {
-                            return Err(Error::contract(format!(
-                                "relocation changed input {}",
-                                T::NAME
-                            )));
-                        }
+                        ensure!(
+                            new_key == *key && new_value.record == value.record,
+                            Error::contract(format!("relocation changed input {}", T::NAME)),
+                        );
                         relocated.insert(new_key, Some(new_value));
                         continue;
                     }

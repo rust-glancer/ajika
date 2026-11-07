@@ -18,6 +18,7 @@ use redb::ReadableTable;
 
 use crate::{
     Database, Error, Result, Write,
+    error::ensure,
     format::{self, FrameHeader, Location, PACKS, PackHeader, PackInfo, VALUES},
     pack::PackWriter,
 };
@@ -124,9 +125,10 @@ impl Database {
                     .checked_add(FrameHeader::LENGTH)
                     .and_then(|start| start.checked_add(header.stored_length))
                     .ok_or_else(|| Error::invalid_cache("invalid pack frame range"))?;
-                if end > info.length {
-                    return Err(Error::invalid_cache("invalid pack frame range"));
-                }
+                ensure!(
+                    end <= info.length,
+                    Error::invalid_cache("invalid pack frame range"),
+                );
                 let live = {
                     let table = write.transaction.open_table(VALUES)?;
                     let location = table
@@ -139,9 +141,10 @@ impl Database {
                             offset: at,
                             header: expected,
                         }) if pack == id && at == offset => {
-                            if header != expected {
-                                return Err(Error::invalid_cache("invalid stored frame header"));
-                            }
+                            ensure!(
+                                header == expected,
+                                Error::invalid_cache("invalid stored frame header"),
+                            );
                             true
                         }
                         _ => false,
@@ -165,11 +168,10 @@ impl Database {
             remaining.scan_offset = offset;
             // A damaged dead-frame length could skip a live frame. Never retire such a file:
             // its inventory must agree that all live locations have actually moved.
-            if offset >= info.length && remaining.live_values != 0 {
-                return Err(Error::invalid_cache(
-                    "pack inventory contains unreachable frames",
-                ));
-            }
+            ensure!(
+                offset < info.length || remaining.live_values == 0,
+                Error::invalid_cache("pack inventory contains unreachable frames"),
+            );
             if remaining.live_values == 0 {
                 retired += 1;
             }

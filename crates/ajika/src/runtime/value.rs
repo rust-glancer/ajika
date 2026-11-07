@@ -7,7 +7,7 @@
 
 use std::{any::Any, sync::Arc};
 
-use crate::{Error, Persist, Result, codec};
+use crate::{Error, Persist, Result, codec, error::ensure};
 
 pub(crate) type Data = Arc<dyn Any + Send + Sync>;
 
@@ -41,9 +41,10 @@ impl Codec {
                 // that capacity instead of asking serialize() to walk it a second time.
                 let mut bytes = Vec::with_capacity(usize::try_from(length)?);
                 codec::encode_into(&mut bytes, value)?;
-                if bytes.len() as u64 != length {
-                    return Err(Error::contract("query encoded size changed"));
-                }
+                ensure!(
+                    bytes.len() as u64 == length,
+                    Error::contract("query encoded size changed"),
+                );
                 Ok(bytes)
             },
             equal: |left, right| {
