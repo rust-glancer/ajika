@@ -427,16 +427,10 @@ impl<S: Send + Sync + 'static> Drop for Operation<'_, S> {
     }
 }
 
-/// The query function's access to inputs, other queries, and the active operation.
+/// Access to inputs and query answers during an operation.
 ///
-/// A function using this handle does not choose between computing and loading its children.
-/// It asks for their answers through ordinary calls. The runtime serves those calls and records
-/// the answers used in this function's frame, which is how the function acquires dependencies
-/// without manually building a read list.
-///
-/// Child query executions receive their own [`Db`] and frame while sharing the same operation.
-/// The host callback has a frame with no owner: there is no parent query whose dependencies need
-/// recording. In every case, the operation's captured inputs stay fixed until it returns.
+/// The host callback and its queries use the same captured inputs for the run. Ajika loads or
+/// computes answers as needed, and reads made inside a query automatically become its dependencies.
 pub struct Db<'operation, S: Send + Sync + 'static = ()> {
     operation: &'operation Operation<'operation, S>,
     frame: &'operation Frame,

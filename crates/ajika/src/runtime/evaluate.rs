@@ -64,8 +64,8 @@ impl<S: Send + Sync + 'static> Db<'_, S> {
         })
     }
 
-    /// Read one typed input field and record its fingerprint in the calling query. The value is
-    /// acquired once per snapshot; a read never replaces an already captured observation.
+    /// Read one typed input field and record a dependency when called from a query.
+    /// Reads within a snapshot reuse the captured value for that field and key.
     pub fn input<T: Input>(&self, key: T::Key) -> Result<T::Value> {
         self.handle(|| {
             self.check_cancelled()?;

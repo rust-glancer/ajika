@@ -231,8 +231,8 @@ impl Database {
         Ok(())
     }
 
-    /// Drop query records and values together. Stable identities survive ordinary invalidation;
-    /// a host resetting those too must first discard every captured input using the old IDs.
+    /// Clear records and values together. If `reset_identities` is true, this also clears saved
+    /// identity assignments and invalidates any IDs that refer to them.
     pub fn invalidate(&mut self, reset_identities: bool) -> Result<()> {
         let mut write = self.begin_write()?;
         write.clear(reset_identities)?;

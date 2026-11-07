@@ -144,8 +144,8 @@ pub enum Durability {
 /// backend continues to keep. The host chooses budgets appropriate to its workspace.
 #[derive(Debug, Clone, Copy)]
 pub struct Retention {
-    /// Encoded records and payloads on disk. The memory backend does not serialize its values
-    /// just to measure them, so it uses only the entry and age limits.
+    /// Encoded byte budget for retained records and payloads. Session results use an estimated
+    /// encoded size. Memory databases apply this limit only to session results.
     pub max_bytes: u64,
     /// Number of stored query calls. A query's return value and named outputs count as one entry.
     pub max_entries: usize,
