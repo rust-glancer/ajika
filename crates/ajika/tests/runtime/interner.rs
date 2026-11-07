@@ -1,3 +1,5 @@
+use std::sync::Arc;
+
 use ajika as renamed;
 use ajika::Database;
 use anyhow::Result;
@@ -95,5 +97,157 @@ fn declarations_have_independent_numbering() -> Result<()> {
     assert_eq!(symbol.text(&interner)?, "main");
     assert_eq!(symbol.disambiguator(&interner)?, 1);
     assert_eq!(Symbol::from_raw(symbol.as_raw()), symbol);
+    Ok(())
+}
+
+#[ajika::query]
+fn packed_value(_cx: &Db, byte: u8) -> ajika::Result<Vec<u8>> {
+    Ok(vec![byte; 4096])
+}
+
+fn truncate_only_pack(root: &std::path::Path) -> Result<()> {
+    let pack = std::fs::read_dir(root.join("packs"))?
+        .next()
+        .expect("one packed value")?
+        .path();
+    // Keep the pack header and remove the frames so a live read encounters the damage.
+    std::fs::OpenOptions::new()
+        .write(true)
+        .open(pack)?
+        .set_len(40)?;
+    Ok(())
+}
+
+struct DamagedCache {
+    root: tempfile::TempDir,
+    db: Database,
+    saved: Arc<File>,
+}
+
+impl DamagedCache {
+    fn new() -> Result<Self> {
+        let root = tempfile::tempdir()?;
+        let mut db = Database::open(root.path(), "test", inputs(""), (), retention())?;
+        db.set_compression(ajika::Compression::None);
+        let saved = db.run(|cx| {
+            packed_value(cx, 42)?;
+            file_id(cx, "saved.rs".into())
+        })?;
+        truncate_only_pack(root.path())?;
+        Ok(Self { root, db, saved })
+    }
+}
+
+#[test]
+fn restart_repairs_a_damaged_pack_and_keeps_saved_ids() -> Result<()> {
+    let DamagedCache { root, db, saved } = DamagedCache::new()?;
+    drop(db);
+
+    let mut db = Database::open(root.path(), "test", inputs(""), (), retention())?;
+    assert_eq!(saved.path(&db.interner())?, "saved.rs");
+    assert_eq!(db.run(|cx| packed_value(cx, 42))?.as_slice(), &[42; 4096]);
+    assert_eq!(db.statistics().executed, 1);
+    Ok(())
+}
+
+#[test]
+fn next_run_repairs_the_cache_and_preserves_live_ids() -> Result<()> {
+    let DamagedCache {
+        root,
+        mut db,
+        saved,
+    } = DamagedCache::new()?;
+    let interner = db.interner();
+    let pending = File::new(&interner, "pending.rs".into())?;
+    let mut calls = 0;
+    db.run(|cx| {
+        calls += 1;
+        packed_value(cx, 42)
+    })
+    .expect_err("the original request sees the damaged value");
+    assert_eq!(calls, 1);
+    assert!(db.recovery_pending());
+
+    assert_eq!(db.run(|cx| packed_value(cx, 42))?.as_slice(), &[42; 4096]);
+    assert_eq!(db.statistics().executed, 1);
+    assert!(!db.recovery_pending());
+    assert_eq!(saved.path(&db.interner())?, "saved.rs");
+    assert_eq!(pending.path(&db.interner())?, "pending.rs");
+    assert_eq!(pending.path(&interner)?, "pending.rs");
+
+    drop(db);
+    let db = Database::open(root.path(), "test", inputs(""), (), retention())?;
+    assert_eq!(pending.path(&db.interner())?, "pending.rs");
+    Ok(())
+}
+
+#[test]
+fn invalidation_repairs_the_cache_and_persists_live_ids() -> Result<()> {
+    let DamagedCache {
+        root,
+        mut db,
+        saved,
+    } = DamagedCache::new()?;
+    let interner = db.interner();
+    let pending = File::new(&interner, "pending.rs".into())?;
+    db.run(|cx| packed_value(cx, 42))
+        .expect_err("the damaged value schedules repair");
+    assert!(db.recovery_pending());
+
+    db.invalidate()?;
+    assert!(!db.recovery_pending());
+    assert_eq!(pending.path(&db.interner())?, "pending.rs");
+    assert_eq!(pending.path(&interner)?, "pending.rs");
+    drop(db);
+
+    // Reopen before any query checkpoint can save the pending assignment.
+    let mut db = Database::open(root.path(), "test", inputs(""), (), retention())?;
+    assert_eq!(pending.path(&db.interner())?, "pending.rs");
+    assert_eq!(saved.path(&db.interner())?, "saved.rs");
+    assert_eq!(db.run(|cx| packed_value(cx, 42))?.as_slice(), &[42; 4096]);
+    assert_eq!(db.statistics().executed, 1);
+    Ok(())
+}
+
+#[test]
+fn successful_run_can_leave_recovery_pending() -> Result<()> {
+    let root = tempfile::tempdir()?;
+    let mut db = Database::open(root.path(), "test", inputs(""), (), retention())?;
+    db.run(|cx| packed_value(cx, 0))?;
+    truncate_only_pack(root.path())?;
+
+    // Independent writes let maintenance find the damage when it consolidates packs.
+    for byte in 1..=32 {
+        assert_eq!(db.run(|cx| packed_value(cx, byte))?[0], byte);
+        if db.recovery_pending() {
+            break;
+        }
+    }
+    assert!(db.recovery_pending(), "maintenance found the damaged pack");
+
+    db.cancellation().cancel();
+    let error = db.run(|_| Ok(())).expect_err("request was cancelled");
+    assert!(error.is_cancelled());
+    assert!(db.recovery_pending());
+
+    db.run(|_| Ok(()))?;
+    assert!(!db.recovery_pending());
+    Ok(())
+}
+
+#[test]
+fn an_aborted_pack_write_keeps_the_warm_checkpoint() -> Result<()> {
+    let root = tempfile::tempdir()?;
+    let mut db = Database::open(root.path(), "test", inputs(""), (), retention())?;
+    let saved = db.run(|cx| file_id(cx, "saved.rs".into()))?;
+    std::fs::remove_dir(root.path().join("packs"))?;
+    db.run(|cx| packed_value(cx, 42))
+        .expect_err("a pack needs a writable directory");
+    assert!(!db.recovery_pending());
+    std::fs::create_dir(root.path().join("packs"))?;
+
+    assert_eq!(db.run(|cx| file_id(cx, "saved.rs".into()))?, saved);
+    assert_eq!(db.statistics().executed, 0, "the saved answer stayed warm");
+    assert_eq!(db.run(|cx| packed_value(cx, 42))?.as_slice(), &[42; 4096]);
     Ok(())
 }

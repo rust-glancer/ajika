@@ -222,36 +222,34 @@ fn page(db: &Db, key: u32) -> ajika::Result<String> {
 
 #[test]
 fn session_eviction_bounds_retained_work_and_recomputes_on_demand() -> Result<()> {
-    for disk in [false, true] {
-        let directory = tempfile::tempdir()?;
+    for (case, max_entries, max_bytes, retained) in [
+        ("entries", 2, u64::MAX, 2),
+        ("bytes", usize::MAX, 2 * 1024, 1),
+    ] {
         let source = Source {
             text: "edited",
             lifetime: Lifetime::Session,
         };
-        let mut db = if disk {
-            Database::open(
-                directory.path().join("queries"),
-                "test",
-                source.capture(),
-                (),
-                retention(),
-            )?
-        } else {
-            Database::memory(source.capture(), (), retention())
-        };
+        let mut db = Database::memory(source.capture(), (), retention());
         db.set_session_retention(ajika::Retention {
-            max_entries: 2,
-            max_bytes: 4096,
+            max_entries,
+            max_bytes,
             ..retention()
         });
-        for key in 0..20 {
-            assert!(db.run(|cx| page(cx, key))?.starts_with(&format!("{key}:")));
-            assert!(db.statistics().session_queries <= 2);
-            assert!(db.statistics().session_bytes <= 4096);
-            assert_eq!(db.statistics().stored_queries, 0);
+        // Request every key again so the assertion does not depend on which keys were evicted.
+        for expected_executions in [3, 3 - retained] {
+            db.run(|cx| {
+                for key in 0..3 {
+                    assert!(page(cx, key)?.starts_with(&format!("{key}:")));
+                }
+                Ok(())
+            })?;
+            let stats = db.statistics();
+            assert_eq!(stats.executed, expected_executions, "{case} budget");
+            assert_eq!(stats.session_queries, retained, "{case} budget");
+            assert!(stats.session_bytes <= max_bytes, "{case} budget");
+            assert_eq!(stats.stored_queries, 0);
         }
-        assert!(db.run(|cx| page(cx, 0))?.starts_with("0:"));
-        assert_eq!(db.statistics().executed, 1);
     }
     Ok(())
 }

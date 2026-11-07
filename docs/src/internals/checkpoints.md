@@ -83,16 +83,16 @@ on a replacement that existed only in the failed operation's working memos.
 The working memos leave with the operation on both success and failure.
 Retained host `Arc` values are outside that cleanup.
 
-Ordinary checkpoint errors can leave storage status uncertain. The backend then
-rejects further work until the host reopens it or successfully invalidates it.
-Cancellation and a storage-capacity refusal have their own handling; they are not
-automatically treated as an unusable cache.
+An aborted write leaves the previous checkpoint intact. After an uncertain
+commit, either checkpoint could be visible. Ajika resolves it before invoking
+the next uncancelled run's callback. See [storage recovery](storage.md#rebuildable-with-explicit-boundaries)
+for how it decides what to keep.
 
 ## Cache commit and host acceptance differ
 
-There is a cancellation check after commit, and maintenance can also return an
-error afterward. Consequently, `run` can fail even though a valid cache checkpoint
-was published.
+There is a cancellation check after commit, so `run` can fail even though a
+valid cache checkpoint was published. Automatic maintenance failures are logged
+and can schedule recovery for the next run.
 
 The host should not infer acceptance of a project generation or editor response
 from the mere existence of those files. Stored results retain their actual input

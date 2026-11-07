@@ -81,9 +81,19 @@ query implementation, key encoding, or result schema makes old stored work unsaf
 to reuse. Ajika tracks input changes; it cannot discover that you edited a function's
 Rust code. A different epoch discards the old cache on opening rather than migrating it.
 
-An in-process `database.invalidate()` discards retained query work while keeping
-the installed inputs and identity assignments. A full cache reset has a wider
-lifecycle; read [interning](interning.md) before keeping IDs outside the database.
+## Recovering a cache
+
+A run that encounters a damaged value returns a storage error and leaves repair
+pending. The next uncancelled `run` on the same database attempts repair before
+invoking its callback. If repair fails, the caller receives that error.
+Maintenance can also discover damage after a successful run, so
+`database.recovery_pending()` reports whether repair is due between runs.
+
+Live repair keeps the installed inputs and interner, as does
+`database.invalidate()` when the host chooses to clear saved work. If
+corruption forces Ajika to discard results, it logs a warning and recomputes
+them on demand. A new process gets its identity assignments from disk, so it
+starts with a fresh interner if the saved identity table is lost.
 
 ## A checkpoint is not application acceptance
 
@@ -91,7 +101,6 @@ The host should reject incoherent input capture before returning successfully fr
 `run`. Ajika can then abandon the operation's new query results.
 
 The host still owns publication of an editor response or project generation.
-Cancellation or maintenance can fail after a checkpoint has committed, so an error
-from `run` is not a promise that the cache directory is unchanged. Stored results
+Cancellation can arrive after a checkpoint has committed. Stored results
 remain associated with the observations they actually used. See
 [`Database::run`](https://github.com/rust-glancer/ajika/blob/main/crates/ajika/src/runtime/mod.rs#L238) and [checkpointing](../internals/checkpoints.md).

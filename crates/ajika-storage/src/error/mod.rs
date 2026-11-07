@@ -169,9 +169,11 @@ impl Error {
     pub(crate) fn at(mut self, path: impl Into<PathBuf>) -> Self {
         // Errors are shared only after publication to callers; constructing filesystem context
         // does not clone an underlying OS error or discard its raw error code.
-        Arc::get_mut(&mut self.inner)
-            .expect("unshared error context")
-            .path = Some(path.into());
+        let details = Arc::get_mut(&mut self.inner).expect("unshared error context");
+        // A pack read can name the affected file even when its caller only knows the cache path.
+        if details.path.is_none() {
+            details.path = Some(path.into());
+        }
         self
     }
 
@@ -214,13 +216,29 @@ impl From<io::Error> for Error {
     }
 }
 
+impl From<redb::DatabaseError> for Error {
+    fn from(source: redb::DatabaseError) -> Self {
+        match source {
+            // redb reports an empty index or a bad file signature as InvalidData during open.
+            // In either case recovery can rebuild the index from caller-supplied assignments.
+            redb::DatabaseError::Storage(redb::StorageError::Io(source))
+                if source.kind() == io::ErrorKind::InvalidData =>
+            {
+                Self::invalid_source(source)
+            }
+            source => redb::Error::from(source).into(),
+        }
+    }
+}
+
 impl From<redb::Error> for Error {
     fn from(source: redb::Error) -> Self {
         // redb's operation-specific wrappers flatten into this enum. Normalize here rather
         // than exposing a different public variant for every index API.
         match source {
             redb::Error::DatabaseAlreadyOpen => Self::in_use(),
-            redb::Error::Io(source) => source.into(),
+            // An index I/O error can latch the redb handle, so recovery reloads the checkpoint.
+            redb::Error::Io(source) => Self::from(source).require_reopen(),
             source @ (redb::Error::Corrupted(_)
             | redb::Error::UpgradeRequired(_)
             | redb::Error::TableTypeMismatch { .. }
@@ -228,7 +246,6 @@ impl From<redb::Error> for Error {
             | redb::Error::TableDoesNotExist(_)) => Self::invalid_source(source),
             source @ (redb::Error::PreviousIo
             | redb::Error::DatabaseClosed
-            | redb::Error::TransactionPoisoned
             | redb::Error::LockPoisoned(_)) => Self::new(
                 ErrorKind::Unavailable,
                 Cause::Source {
@@ -252,7 +269,6 @@ impl From<redb::Error> for Error {
 }
 
 index_error!(
-    redb::DatabaseError,
     redb::StorageError,
     redb::TableError,
     redb::TransactionError,

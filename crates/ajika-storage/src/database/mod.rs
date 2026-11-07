@@ -8,6 +8,7 @@ use std::{
     collections::HashSet,
     error::Error as _,
     fs::{self, File, OpenOptions},
+    io,
     path::{Path, PathBuf},
     sync::{
         Mutex, RwLock,
@@ -23,6 +24,19 @@ use crate::{
     format::{self, HEADER, IDENTITIES, PACKS, PackHeader, PackId, PackInfo, RECORDS, VALUES},
     pack::PackWriter,
 };
+
+const INDEX_FILE: &str = "index.redb";
+const INDEX_CACHE_BYTES: usize = 8 * 1024 * 1024;
+const REBUILD_FILE: &str = "index.rebuild.redb";
+
+/// A key and its assigned ID within a namespace. Pass existing assignments to
+/// [`Database::rebuild`] so callers can keep using their IDs after an index is replaced.
+#[derive(Debug, Clone, Copy)]
+pub struct Identity<'a> {
+    pub namespace: &'a str,
+    pub id: u32,
+    pub key: &'a [u8],
+}
 
 /// Policy for writes and maintenance; existing frames carry their own decoding information.
 #[derive(Debug, Clone, Copy)]
@@ -47,7 +61,9 @@ impl Default for Options {
 /// Reads borrow this owner, and a write excludes reads until publication and file retirement
 /// finish. Callers should keep these scopes short and retain decoded values instead of readers.
 pub struct Database {
-    pub(crate) index: redb::Database,
+    // Recovery can drop the redb handle while `_owner` keeps the directory locked.
+    index: Option<redb::Database>,
+    epoch: String,
     pub(crate) root: PathBuf,
     pub(crate) packs: PathBuf,
     pub(crate) instance: PackId,
@@ -64,7 +80,7 @@ pub struct Database {
 
 impl Database {
     /// Open the cache and hold its directory lock for as long as the owner is alive.
-    /// An incompatible format or an unreadable pack can cause a reset while holding that lock.
+    /// Incompatible or confirmed corrupt contents can be discarded under that lock.
     /// Keep only data the application can rebuild in this directory.
     pub fn open(path: &Path, epoch: &str, options: Options) -> Result<Self> {
         let result = (|| -> Result<Self> {
@@ -79,98 +95,142 @@ impl Database {
                 fs::TryLockError::WouldBlock => Error::in_use(),
                 fs::TryLockError::Error(error) => error.into(),
             })?;
-            let packs = path.join("packs");
-            fs::create_dir_all(&packs)?;
-            let (index, instance) = match Self::open_contents(path, epoch) {
-                Ok(contents) => contents,
-                Err(error) if error.kind() == ErrorKind::InUse => return Err(error),
-                Err(error) => {
-                    tracing::warn!(
-                        %error,
-                        cause = error.source().map(tracing::field::display),
-                        path = %path.display(),
-                        "discarding unreadable packed storage"
-                    );
-                    // TODO: Implement more sophisticated recovery paths.
-                    // The failed open has released all redb handles. Keep owner.lock in place so
-                    // another opener cannot acquire a new lock inode while this reset is running.
-                    let index = path.join("index.redb");
-                    if index.exists() {
-                        fs::remove_file(index)?;
-                    }
-                    fs::remove_dir_all(&packs)?;
-                    fs::create_dir_all(&packs)?;
-                    Self::open_contents(path, epoch)?
-                }
-            };
-            let database = Self {
-                index,
+            let mut database = Self {
+                index: None,
+                epoch: format!("{}:{epoch}", format::FORMAT),
                 root: path.to_owned(),
-                packs,
-                instance,
+                packs: path.join("packs"),
+                instance: [0; 16],
                 access: RwLock::new(()),
-                healthy: AtomicBool::new(true),
+                healthy: AtomicBool::new(false),
                 physical_bytes: AtomicU64::new(0),
                 maintenance_due: AtomicBool::new(true),
                 options,
                 files: Mutex::default(),
                 _owner: owner,
             };
-            if let Err(error) = database.clean_orphans() {
+
+            if let Err(error) = database.load(true) {
+                if error.kind() != ErrorKind::InvalidCache {
+                    return Err(error);
+                }
+                // Pack damage can leave the identity table intact. Try clearing query data
+                // first so callers can still load those assignments.
+                let identities_discarded = match database.reset(None) {
+                    Ok(()) => false,
+                    Err(reset) if reset.kind() == ErrorKind::InvalidCache => {
+                        database.reset(Some(&[]))?;
+                        true
+                    }
+                    Err(reset) => return Err(reset),
+                };
                 tracing::warn!(
                     %error,
                     cause = error.source().map(tracing::field::display),
-                    "pack cleanup deferred"
+                    path = %path.display(),
+                    identities_discarded,
+                    "discarded corrupt cache contents"
                 );
             }
-            database.refresh_physical_bytes()?;
             Ok(database)
         })();
-        // Give the caller the cache path for failures from any part of opening it.
         result.map_err(|error| error.at(path))
     }
 
-    fn open_contents(path: &Path, epoch: &str) -> Result<(redb::Database, PackId)> {
-        let index = redb::Database::builder()
-            .set_cache_size(8 * 1024 * 1024)
-            .create(path.join("index.redb"))?;
-        let expected = format!("{}:{epoch}", format::FORMAT);
-        let write = index.begin_write()?;
-        let (reset, instance) = {
-            let mut header = write.open_table(HEADER)?;
-            let reset = header
-                .get("epoch")?
-                .is_none_or(|value| value.value() != expected.as_bytes());
-            let instance = if reset {
-                let instance = format::new_id()?;
-                header.insert("epoch", expected.as_bytes())?;
-                header.insert("instance", instance.as_slice())?;
-                instance
-            } else {
-                header
-                    .get("instance")?
-                    .ok_or_else(|| Error::invalid_cache("missing storage instance"))?
-                    .value()
-                    .try_into()
-                    .map_err(Error::invalid_source)?
-            };
-            (reset, instance)
-        };
-        if reset {
-            write.delete_table(RECORDS)?;
-            write.delete_table(IDENTITIES)?;
-            write.delete_table(VALUES)?;
-            write.delete_table(PACKS)?;
-        }
-        drop(write.open_table(RECORDS)?);
-        drop(write.open_table(IDENTITIES)?);
-        drop(write.open_table(VALUES)?);
-        drop(write.open_table(PACKS)?);
-        write.commit()?;
+    /// Reload the disk checkpoint while retaining the directory lock.
+    ///
+    /// After an uncertain commit, the recovered index tells us which packs to keep.
+    /// If reopening fails, reads and writes resume after a successful reopen or rebuild.
+    pub fn reopen(&mut self) -> Result<()> {
+        self.load(false)
+            .map_err(|error| error.require_reopen().at(&self.root))
+    }
 
-        // Opening checks existence and framing, not every payload. Individual reads verify
-        // checksums later, so restarting does not scan gigabytes of cached values.
+    fn load(&mut self, create: bool) -> Result<()> {
+        self.load_index(create)?;
+        self.validate_catalog()?;
+        self.finish_open()
+    }
+
+    fn load_index(&mut self, create: bool) -> Result<()> {
+        self.healthy.store(false, Ordering::Release);
+        self.files.get_mut().expect("pack handles").clear();
+        self.index.take();
+
+        let path = self.root.join(INDEX_FILE);
+        let mut builder = redb::Database::builder();
+        builder.set_cache_size(INDEX_CACHE_BYTES);
+        let index = if create {
+            builder.create(&path)?
+        } else {
+            // Callers may already hold IDs from this cache. A missing index needs recovery
+            // so the caller can republish those assignments.
+            builder.open(&path).map_err(|error| match error {
+                redb::DatabaseError::Storage(redb::StorageError::Io(source))
+                    if source.kind() == io::ErrorKind::NotFound =>
+                {
+                    Error::invalid_source(source)
+                }
+                error => error.into(),
+            })?
+        };
+        self.instance = match self.read_index_instance(&index)? {
+            Some(instance) => instance,
+            None if create => self.initialize_index(&index, &[])?,
+            None => return Err(Error::invalid_cache("storage epoch changed")),
+        };
+        self.index = Some(index);
+        Ok(())
+    }
+
+    fn read_index_instance(&self, index: &redb::Database) -> Result<Option<PackId>> {
         let read = index.begin_read()?;
+        let header = match read.open_table(HEADER) {
+            Ok(header) => header,
+            Err(redb::TableError::TableDoesNotExist(_)) => return Ok(None),
+            Err(error) => return Err(error.into()),
+        };
+        if header
+            .get("epoch")?
+            .is_none_or(|value| value.value() != self.epoch.as_bytes())
+        {
+            return Ok(None);
+        }
+        let instance = header
+            .get("instance")?
+            .ok_or_else(|| Error::invalid_cache("missing storage instance"))?
+            .value()
+            .try_into()
+            .map_err(Error::invalid_source)?;
+        Ok(Some(instance))
+    }
+
+    fn initialize_index(
+        &self,
+        index: &redb::Database,
+        identities: &[Identity<'_>],
+    ) -> Result<PackId> {
+        let instance = format::new_id()?;
+        let write = index.begin_write()?;
+        {
+            let mut header = write.open_table(HEADER)?;
+            header.insert("epoch", self.epoch.as_bytes())?;
+            header.insert("instance", instance.as_slice())?;
+        }
+        // Commit the epoch and cleared catalog together so a restart sees a matching pair.
+        Self::clear_catalog(&write, Some(identities))?;
+        write.commit()?;
+        Ok(instance)
+    }
+
+    fn validate_catalog(&self) -> Result<()> {
+        let index = self.index.as_ref().expect("loaded index");
+        let read = index.begin_read()?;
+        drop(read.open_table(IDENTITIES)?);
+        drop(read.open_table(RECORDS)?);
+        drop(read.open_table(VALUES)?);
+        // Check the files and their headers up front. Verifying each payload on demand
+        // keeps opening a large cache from reading gigabytes of saved results.
         for entry in read.open_table(PACKS)?.iter()? {
             let (id, bytes) = entry?;
             let info: PackInfo = format::decode(bytes.value())?;
@@ -181,7 +241,7 @@ impl Database {
                     && (PackHeader::LENGTH..info.length).contains(&info.scan_offset),
                 Error::invalid_cache("invalid pack inventory"),
             );
-            let mut file = File::open(PackWriter::path(&path.join("packs"), id.value()))?;
+            let mut file = self.open_pack(id.value())?;
             ensure!(
                 file.metadata()?.len() == info.length,
                 Error::invalid_cache("invalid pack file length"),
@@ -191,7 +251,7 @@ impl Database {
             let header: PackHeader = format::decode(&bytes)?;
             let expected_header = PackHeader {
                 magic: PackHeader::MAGIC,
-                instance,
+                instance: self.instance,
                 pack: *id.value(),
             };
             ensure!(
@@ -199,9 +259,50 @@ impl Database {
                 Error::invalid_cache("invalid pack identity"),
             );
         }
-        drop(read);
-        PackWriter::sync_directory(path)?;
-        Ok((index, instance))
+        Ok(())
+    }
+
+    fn finish_open(&mut self) -> Result<()> {
+        fs::create_dir_all(&self.packs)?;
+        self.files.get_mut().expect("pack handles").clear();
+        // Sync the directory before deleting old packs. If a crash restores the old
+        // `index.redb` directory entry, that catalog still needs its packs.
+        PackWriter::sync_directory(&self.root)?;
+        if let Err(error) = self.clean_orphans() {
+            // Pack deletion can wait. An unreadable catalog blocks recovery.
+            if error.requires_reopen() || error.kind() == ErrorKind::InvalidCache {
+                return Err(error);
+            }
+            tracing::warn!(
+                %error,
+                cause = error.source().map(tracing::field::display),
+                path = %self.root.display(),
+                "pack cleanup deferred"
+            );
+        }
+        if let Err(error) = self.remove_replacement() {
+            tracing::warn!(%error, path = %self.root.display(), "index cleanup deferred");
+        }
+        self.refresh_physical_bytes()?;
+        self.healthy.store(true, Ordering::Release);
+        self.maintenance_due.store(true, Ordering::Relaxed);
+        Ok(())
+    }
+
+    pub(crate) fn open_pack(&self, id: &PackId) -> Result<File> {
+        let path = PackWriter::path(&self.packs, id);
+        File::open(&path).map_err(|source| {
+            let error = if source.kind() == io::ErrorKind::NotFound {
+                Error::invalid_source(source)
+            } else {
+                Error::from(source)
+            };
+            error.at(path)
+        })
+    }
+
+    pub fn path(&self) -> &Path {
+        &self.root
     }
 
     pub fn compression(&self) -> Compression {
@@ -222,23 +323,99 @@ impl Database {
         Write::new(self).map_err(|error| error.at(self.root.clone()))
     }
 
-    pub(crate) fn check(&self) -> Result<()> {
+    pub(crate) fn index(&self) -> Result<&redb::Database> {
         if !self.healthy.load(Ordering::Acquire) {
-            return Err(
-                Error::unavailable("reopen storage after its failed commit").require_reopen()
-            );
+            return Err(Error::unavailable("storage checkpoint needs recovery").require_reopen());
+        }
+        Ok(self.index.as_ref().expect("healthy index"))
+    }
+
+    /// Clear records and values while preserving the saved identity table.
+    /// This requires a recoverable identity table.
+    pub fn invalidate(&mut self) -> Result<()> {
+        self.reset(None)
+            .map_err(|error| error.require_reopen().at(&self.root))
+    }
+
+    /// Discard query data and replace the saved identity table. Pass an empty slice to clear
+    /// all assignments. If the index is corrupt, replace it while keeping the directory lock.
+    pub fn rebuild(&mut self, identities: &[Identity<'_>]) -> Result<()> {
+        self.reset(Some(identities))
+            .map_err(|error| error.require_reopen().at(&self.root))
+    }
+
+    fn reset(&mut self, identities: Option<&[Identity<'_>]>) -> Result<()> {
+        // `None` means keep the saved identity table, so the index must be readable.
+        // With `Some`, we have the assignments needed to build a fresh index if necessary.
+        match (self.clear_index(identities), identities) {
+            (Ok(()), _) => {}
+            (Err(error), Some(identities)) if error.kind() == ErrorKind::InvalidCache => {
+                self.replace_index(identities)?;
+            }
+            (Err(error), _) => return Err(error),
+        }
+        self.finish_open()
+    }
+
+    fn clear_index(&mut self, identities: Option<&[Identity<'_>]>) -> Result<()> {
+        // On Unix, a cleanup tool can replace `index.redb` with an empty file while Ajika
+        // still has the original open. A rebuild through that handle can report success
+        // while saving IDs to the old file. On restart, Ajika would open the empty index.
+        // Reopen `index.redb` under the directory lock so the reset targets the file a
+        // restart will read. Loading the index is enough because clearing the catalog
+        // drops every pack reference, even when the packs are damaged.
+        self.load_index(false)?;
+        let index = self.index.as_ref().expect("loaded index");
+        let write = index.begin_write()?;
+        Self::clear_catalog(&write, identities)?;
+        write.commit()?;
+        Ok(())
+    }
+
+    fn clear_catalog(
+        write: &redb::WriteTransaction,
+        identities: Option<&[Identity<'_>]>,
+    ) -> Result<()> {
+        write.delete_table(RECORDS)?;
+        write.delete_table(VALUES)?;
+        write.delete_table(PACKS)?;
+        drop(write.open_table(RECORDS)?);
+        drop(write.open_table(VALUES)?);
+        drop(write.open_table(PACKS)?);
+        if let Some(identities) = identities {
+            write.delete_table(IDENTITIES)?;
+            let mut table = write.open_table(IDENTITIES)?;
+            for identity in identities {
+                table.insert((identity.namespace, identity.id), identity.key)?;
+            }
+        } else {
+            drop(write.open_table(IDENTITIES)?);
         }
         Ok(())
     }
 
-    /// Clear records and values together. If `reset_identities` is true, this also clears saved
-    /// identity assignments and invalidates any IDs that refer to them.
-    pub fn invalidate(&mut self, reset_identities: bool) -> Result<()> {
-        let mut write = self.begin_write()?;
-        write.clear(reset_identities)?;
-        write.commit()?;
-        self.healthy.store(true, Ordering::Release);
-        Ok(())
+    fn replace_index(&mut self, identities: &[Identity<'_>]) -> Result<()> {
+        self.index.take();
+        self.files.get_mut().expect("pack handles").clear();
+        let replacement = self.root.join(REBUILD_FILE);
+        // Build the new catalog at a temporary path. If recovery stops before the rename,
+        // the next opener can still inspect the published index and retry the repair.
+        self.remove_replacement()?;
+        let index = redb::Database::builder()
+            .set_cache_size(INDEX_CACHE_BYTES)
+            .create(&replacement)?;
+        self.initialize_index(&index, identities)?;
+        drop(index);
+        fs::rename(replacement, self.root.join(INDEX_FILE))?;
+        self.load_index(false)
+    }
+
+    fn remove_replacement(&self) -> Result<()> {
+        match fs::remove_file(self.root.join(REBUILD_FILE)) {
+            Ok(()) => Ok(()),
+            Err(error) if error.kind() == io::ErrorKind::NotFound => Ok(()),
+            Err(error) => Err(error.into()),
+        }
     }
 
     /// Finish pack reclamation and shrink the index. This explicit idle operation is unbounded;
@@ -250,7 +427,7 @@ impl Database {
         }
         self.files.get_mut().expect("pack handles").clear();
         self.clean_orphans()?;
-        changed |= self.index.compact()?;
+        changed |= self.index.as_mut().expect("healthy index").compact()?;
         self.refresh_physical_bytes()?;
         Ok(changed)
     }
@@ -267,7 +444,7 @@ impl Database {
     /// Remove files that neither a successful checkpoint nor its live values can reach.
     /// This is used only while opening, or under exclusive access after publication.
     pub(crate) fn clean_orphans(&self) -> Result<()> {
-        let read = self.index.begin_read()?;
+        let read = self.index.as_ref().expect("published index").begin_read()?;
         let mut keep = HashSet::new();
         for entry in read.open_table(PACKS)?.iter()? {
             let (id, _) = entry?;
@@ -299,7 +476,7 @@ impl Database {
     }
 
     pub(crate) fn refresh_physical_bytes(&self) -> Result<()> {
-        let mut bytes = Self::allocated(&fs::metadata(self.root.join("index.redb"))?);
+        let mut bytes = Self::allocated(&fs::metadata(self.root.join(INDEX_FILE))?);
         for entry in fs::read_dir(&self.packs)? {
             bytes += Self::allocated(&entry?.metadata()?);
         }

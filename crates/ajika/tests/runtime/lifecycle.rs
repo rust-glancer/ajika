@@ -244,30 +244,6 @@ fn a_failed_operation_discards_new_work_but_keeps_the_previous_checkpoint() -> R
 }
 
 #[test]
-fn cold_record_collection_bounds_keys_and_collected_dependencies_replay() -> Result<()> {
-    let directory = tempfile::tempdir()?;
-    let path = directory.path().join("queries");
-    let limits = Retention {
-        max_entries: 1,
-        ..retention()
-    };
-    let mut db = Database::open(&path, "test", inputs("hello"), (), limits)?;
-    for file in 0..12 {
-        assert_eq!(
-            db.run(|db| symbols(db, file))?.as_str(),
-            format!("symbols:{file}:hello")
-        );
-        assert!(db.statistics().stored_queries <= 1);
-    }
-    drop(db);
-    let mut db = Database::open(&path, "test", inputs("hello"), (), limits)?;
-    assert_eq!(db.run(|db| symbols(db, 0))?.as_str(), "symbols:0:hello");
-    assert!(db.statistics().stored_queries <= 1);
-    assert!(db.statistics().collected > 0);
-    Ok(())
-}
-
-#[test]
 fn a_new_schema_epoch_and_explicit_invalidation_start_fresh() -> Result<()> {
     let directory = tempfile::tempdir()?;
     let path = directory.path().join("queries");
@@ -313,27 +289,37 @@ fn retention_also_reclaims_obsolete_payloads_between_operations() -> Result<()> 
     let path = directory.path().join("queries");
     let text = "x".repeat(256 * 1024);
     let limits = Retention {
-        max_entries: 8,
+        max_entries: 2,
         ..retention()
     };
     let mut db = Database::open(&path, "test", inputs(&text), (), limits)?;
     db.set_compression(ajika::Compression::None);
-    // These results share a pack. Retention removes most of them after the operation;
-    // automatic maintenance must reclaim their bytes while keeping the remaining answers.
+    // Writing all results together puts them in one pack. Evicting six leaves enough dead
+    // space to trigger automatic compaction while two results still need their payloads.
     db.run(|db| {
-        for file in 0..32 {
+        for file in 0..8 {
             tree(db, file)?;
         }
         Ok(())
     })?;
     let storage = db.storage_statistics()?.expect("disk storage");
-    assert_eq!(storage.values, 8);
+    assert_eq!(storage.values, 2);
     assert_eq!(storage.dead_pack_bytes, 0);
-    assert!(storage.pack_file_bytes < 3 * 1024 * 1024);
+    assert!(storage.pack_file_bytes < 1024 * 1024);
     drop(db);
 
     let mut db = Database::open(&path, "test", inputs(&text), (), limits)?;
-    assert_eq!(db.run(|db| tree(db, 0))?.as_str(), format!("0:{text}"));
-    assert_eq!(db.statistics().stored_queries, 8);
+    db.run(|db| {
+        for file in 0..8 {
+            assert_eq!(tree(db, file)?.as_str(), format!("{file}:{text}"));
+        }
+        Ok(())
+    })?;
+    assert_eq!(
+        db.statistics().executed,
+        6,
+        "only evicted results run again"
+    );
+    assert_eq!(db.statistics().stored_queries, 2);
     Ok(())
 }

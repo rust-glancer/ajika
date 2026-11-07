@@ -150,8 +150,8 @@ The owner issues a fresh token after the operation or input replacement; retain
 the token for the work you mean to cancel, not for all future operations.
 
 A failed operation releases its working set and claims. A cache checkpoint may
-already have committed before a late cancellation or maintenance error, so the
-host still decides whether to publish the response. `Error::requires_reopen()`
-reports whether the failed operation left the database unusable; a capacity
-refusal permits reads and reclamation without reopening. See the
-[operation implementation](https://github.com/rust-glancer/ajika/blob/main/crates/ajika/src/runtime/mod.rs#L238) for the exact boundary.
+already have committed before a late cancellation, so the host still decides
+whether to publish the response. Automatic maintenance failures are logged.
+
+A capacity refusal still permits reads and reclamation. Storage errors can
+schedule [cache repair](persistence.md#recovering-a-cache) for the next run.

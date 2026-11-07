@@ -20,8 +20,7 @@ just test-book
 ```
 
 This builds Ajika's examples into a dedicated Cargo target directory, then runs
-mdBook's Rust snippet tests with that directory's dependencies. Keeping that
-build separate avoids mixing it with the independently linked replay fixture.
+mdBook's Rust snippet tests with that directory's dependencies.
 
 The longer tutorial snippets come from runnable examples under
 `examples/`. Named anchors select visible sections;

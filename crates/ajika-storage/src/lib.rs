@@ -6,7 +6,8 @@
 //! Call [`Database::maintain`] between operations to reclaim disk space.
 //!
 //! The directory is a disposable cache, exclusively owned until [`Database`] drops.
-//! Opening an unreadable cache can reset it. Errors during use are returned to the caller.
+//! Opening can discard corrupt cache data. After an uncertain commit, call [`Database::reopen`]
+//! on the same owner to recover the published checkpoint.
 
 mod database;
 mod error;
@@ -18,7 +19,7 @@ mod transaction;
 mod value;
 
 pub use self::{
-    database::{Database, Options},
+    database::{Database, Identity, Options},
     error::{Error, ErrorKind, Result},
     statistics::Statistics,
     transaction::{Read, Write},

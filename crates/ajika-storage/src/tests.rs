@@ -110,7 +110,7 @@ fn removing_neighbors_keeps_live_frames_until_the_pack_is_empty() -> Result<()> 
     assert_eq!(database.snapshot()?.read_value(&[2; 32], 10_000)?, value);
     assert!(database.statistics()?.dead_pack_bytes >= 10_000);
 
-    database.invalidate(false)?;
+    database.invalidate()?;
     let stats = database.statistics()?;
     assert_eq!((stats.values, stats.pack_files), (0, 0));
     assert_eq!(
@@ -200,33 +200,35 @@ fn relocation_preserves_compression_when_the_write_policy_changes() -> Result<()
 
 #[test]
 fn small_writes_consolidate_and_repeated_replacements_settle() -> Result<()> {
+    const KEYS: u8 = 32;
     let root = tempfile::tempdir()?;
     let mut database = Database::open(root.path(), "fixture", Options::default())?;
     let mut peak_files = 0;
-    for turn in 0..256 {
-        let id = (turn % 32) as u8;
+    for turn in 0..3 * KEYS {
+        let id = turn % KEYS;
         let mut write = database.begin_write()?;
-        write.write_value(&[id; 32], Compression::None.encode(vec![id; 16 * 1024])?)?;
+        write.write_value(&[id; 32], Compression::None.encode(vec![turn; 16 * 1024])?)?;
         write.commit()?;
         database.maintain()?;
         peak_files = peak_files.max(database.statistics()?.pack_files);
-        if turn == 127 {
+        if turn + 1 == 2 * KEYS {
             drop(database);
             database = Database::open(root.path(), "fixture", Options::default())?;
         }
     }
     assert!(
-        peak_files < 32,
+        peak_files < u64::from(KEYS),
         "consolidation bounds files during repeated writes: {peak_files}"
     );
     database.compact()?;
     let stats = database.statistics()?;
-    assert_eq!((stats.values, stats.dead_pack_bytes), (32, 0));
+    assert_eq!((stats.values, stats.dead_pack_bytes), (u64::from(KEYS), 0));
     assert_eq!(stats.pack_files, 1);
-    for id in 0..32 {
+    let read = database.snapshot()?;
+    for id in 0..KEYS {
         assert_eq!(
-            database.snapshot()?.read_value(&[id; 32], 16 * 1024)?,
-            vec![id; 16 * 1024]
+            read.read_value(&[id; 32], 16 * 1024)?,
+            vec![2 * KEYS + id; 16 * 1024]
         );
     }
     Ok(())
@@ -327,4 +329,68 @@ fn interrupted_storage_worker() -> Result<()> {
         write.packs.finish()?;
     }
     std::process::exit(73);
+}
+
+#[test]
+fn reloading_a_stopped_owner_keeps_its_checkpoint_and_lock() -> Result<()> {
+    let root = tempfile::tempdir()?;
+    let mut database = Database::open(root.path(), "fixture", Options::default())?;
+    let write = database.begin_write()?;
+    write.set_metadata(&[1; 32], b"complete checkpoint")?;
+    write.commit()?;
+
+    // Model the state after an uncertain commit. The published catalog remains on disk.
+    database
+        .healthy
+        .store(false, std::sync::atomic::Ordering::Release);
+    database.reopen()?;
+    assert_eq!(
+        database.snapshot()?.metadata(&[1; 32])?.as_deref(),
+        Some(b"complete checkpoint".as_slice())
+    );
+    assert!(matches!(
+        Database::open(root.path(), "fixture", Options::default()),
+        Err(error) if error.kind() == crate::ErrorKind::InUse
+    ));
+    Ok(())
+}
+
+#[test]
+fn opening_rebuilds_a_damaged_index() -> Result<()> {
+    let root = tempfile::tempdir()?;
+    std::fs::write(root.path().join("index.redb"), b"damaged header")?;
+
+    let database = Database::open(root.path(), "fixture", Options::default())?;
+    let write = database.begin_write()?;
+    write.set_metadata(&[1; 32], b"rebuilt checkpoint")?;
+    write.commit()?;
+    assert_eq!(
+        database.snapshot()?.metadata(&[1; 32])?.as_deref(),
+        Some(b"rebuilt checkpoint".as_slice())
+    );
+    Ok(())
+}
+
+#[cfg(unix)]
+#[test]
+fn rebuilding_an_empty_index_restores_supplied_identities() -> Result<()> {
+    let root = tempfile::tempdir()?;
+    let mut database = Database::open(root.path(), "fixture", Options::default())?;
+    let index = root.path().join("index.redb");
+    // Move the old inode aside so closing its redb handle cannot change the empty file.
+    std::fs::rename(&index, root.path().join("previous.redb"))?;
+    std::fs::File::create(index)?;
+
+    database.rebuild(&[crate::Identity {
+        namespace: "files",
+        id: 0,
+        key: b"src/lib.rs",
+    }])?;
+    drop(database);
+    let database = Database::open(root.path(), "fixture", Options::default())?;
+    assert_eq!(
+        database.snapshot()?.identities()?,
+        vec![("files".into(), 0, b"src/lib.rs".to_vec())]
+    );
+    Ok(())
 }
