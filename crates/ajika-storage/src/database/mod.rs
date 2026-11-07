@@ -174,44 +174,51 @@ impl Database {
                 error => error.into(),
             })?
         };
-        self.instance = self.initialize_index(&index, create.then_some(&[]))?;
+        self.instance = match self.read_index_instance(&index)? {
+            Some(instance) => instance,
+            None if create => self.initialize_index(&index, &[])?,
+            None => return Err(Error::invalid_cache("storage epoch changed")),
+        };
         self.index = Some(index);
         Ok(())
+    }
+
+    fn read_index_instance(&self, index: &redb::Database) -> Result<Option<PackId>> {
+        let read = index.begin_read()?;
+        let header = match read.open_table(HEADER) {
+            Ok(header) => header,
+            Err(redb::TableError::TableDoesNotExist(_)) => return Ok(None),
+            Err(error) => return Err(error.into()),
+        };
+        if header
+            .get("epoch")?
+            .is_none_or(|value| value.value() != self.epoch.as_bytes())
+        {
+            return Ok(None);
+        }
+        let instance = header
+            .get("instance")?
+            .ok_or_else(|| Error::invalid_cache("missing storage instance"))?
+            .value()
+            .try_into()
+            .map_err(Error::invalid_source)?;
+        Ok(Some(instance))
     }
 
     fn initialize_index(
         &self,
         index: &redb::Database,
-        initialize: Option<&[Identity<'_>]>,
+        identities: &[Identity<'_>],
     ) -> Result<PackId> {
+        let instance = format::new_id()?;
         let write = index.begin_write()?;
-        let (compatible, instance) = {
+        {
             let mut header = write.open_table(HEADER)?;
-            let compatible = header
-                .get("epoch")?
-                .is_some_and(|value| value.value() == self.epoch.as_bytes());
-            let instance = if compatible {
-                header
-                    .get("instance")?
-                    .ok_or_else(|| Error::invalid_cache("missing storage instance"))?
-                    .value()
-                    .try_into()
-                    .map_err(Error::invalid_source)?
-            } else if initialize.is_some() {
-                let instance = format::new_id()?;
-                header.insert("epoch", self.epoch.as_bytes())?;
-                header.insert("instance", instance.as_slice())?;
-                instance
-            } else {
-                return Err(Error::invalid_cache("storage epoch changed"));
-            };
-            (compatible, instance)
-        };
-        if !compatible {
-            // Publish the new epoch and cleared catalog together. A restart uses the
-            // epoch to decide whether saved query records are compatible.
-            Self::clear_catalog(&write, initialize)?;
+            header.insert("epoch", self.epoch.as_bytes())?;
+            header.insert("instance", instance.as_slice())?;
         }
+        // Commit the epoch and cleared catalog together so a restart sees a matching pair.
+        Self::clear_catalog(&write, Some(identities))?;
         write.commit()?;
         Ok(instance)
     }
@@ -398,7 +405,7 @@ impl Database {
         let index = redb::Database::builder()
             .set_cache_size(INDEX_CACHE_BYTES)
             .create(&replacement)?;
-        self.initialize_index(&index, Some(identities))?;
+        self.initialize_index(&index, identities)?;
         drop(index);
         fs::rename(replacement, self.root.join(INDEX_FILE))?;
         self.load_index(false)
