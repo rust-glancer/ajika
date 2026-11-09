@@ -5,9 +5,18 @@ use super::support::{
     workload::{self, Edit},
 };
 
+/// Reopen a database that already contains a saved index.
+#[divan::bench(args = [32], sample_count = 10, sample_size = 1)]
+fn reopen(bencher: Bencher, files: u32) {
+    let cache = SavedCache::new(files);
+    // Returning the fixture lets Divan drop it after measurement, so redb's shutdown
+    // commit does not obscure the cost of reopening a small cache.
+    bencher.bench_local(|| cache.open());
+}
+
 /// Open and close a database that already contains a saved index.
 /// Measures loading cache metadata without requesting any query values.
-#[divan::bench(args = [32, 512], sample_count = 10, sample_size = 1)]
+#[divan::bench(args = [512], sample_count = 10, sample_size = 1)]
 fn open_and_close(bencher: Bencher, files: u32) {
     let cache = SavedCache::new(files);
     bencher.bench_local(|| black_box_drop(cache.open()));
