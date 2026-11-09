@@ -19,14 +19,19 @@ use crate::{
     Durability, Error, Input, Lifetime, Persist, Query, Result, UnavailableData, error::ensure,
 };
 
-impl<S: Send + Sync + 'static> Db<'_, S> {
+impl<'db, S: Send + Sync + 'static> Db<'db, S> {
     /// Ask query Q for the answer to `key` under this operation's captured inputs.
     /// Repeated calls can share a loaded answer; later calls may load a saved answer or compute
     /// a new one. The caller always receives an ordinary [`Arc`] and need not choose the path.
     ///
     /// Inside another query, this also records which answer the parent used. For example,
     /// `word_count` depends on the version of the answer from `words`, so an edit that leaves the words
-    /// equal need not rerun `word_count`. Declaration macros call this entry point for you.
+    /// equal need not rerun `word_count`.
+    ///
+    /// A free `#[ajika::query]` function generates a type with the same name. For example,
+    /// `db.query::<words>(file)?` obtains an owned answer even if `words` uses `returns(ref)`.
+    /// Pass `()` for no key arguments, the argument itself for one, or a tuple for several.
+    /// For a handwritten query, use its implementing type and pass its [`Key`](Query::Key).
     pub fn query<Q: Query<Services = S>>(&self, key: Q::Key) -> Result<Arc<Q::Value>> {
         self.handle(|| {
             self.check_cancelled()?;
@@ -58,10 +63,19 @@ impl<S: Send + Sync + 'static> Db<'_, S> {
                 .expect("requested query value is resident")
                 .typed()?;
 
-            self.frame.remember_query::<Q>(key, Arc::clone(&value));
-
-            Ok(value)
+            Ok(self.frame.remember_query::<Q>(key, value))
         })
+    }
+
+    /// Borrow a query answer for the lifetime of this context.
+    /// Use the same query type and key as [`query`](Self::query), as in
+    /// `db.query_ref::<words>(file)?`. Both calls record the same dependency.
+    /// Use `query` to keep the answer after the operation ends.
+    pub fn query_ref<Q: Query<Services = S>>(&self, key: Q::Key) -> Result<&'db Q::Value> {
+        let value = self.query::<Q>(key)?;
+        // SAFETY: query returns the allocation kept in the frame. The frame never
+        // removes or replaces acquired query values and is borrowed for 'db.
+        Ok(unsafe { &*Arc::as_ptr(&value) })
     }
 
     /// Read one typed input field and record a dependency when called from a query.
@@ -660,5 +674,38 @@ impl<S: Send + Sync + 'static> Db<'_, S> {
                 .unwrap_or(0);
         }
         Ok(value.map(|(value, _)| value))
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use std::time::Duration;
+
+    use crate::{Database, Db, Inputs, Result, Retention};
+
+    #[crate::query(crate = crate, transient, returns(ref))]
+    fn label(_db: &Db<'_>, number: u32) -> Result<String> {
+        Ok(number.to_string())
+    }
+
+    #[test]
+    fn borrowed_query_answers_share_the_owned_answer() -> Result<()> {
+        let mut database = Database::memory(
+            Inputs::default(),
+            (),
+            Retention {
+                max_entries: 1,
+                max_bytes: 1024,
+                max_idle: Duration::from_secs(60),
+            },
+        );
+        database.run(|db| {
+            let first = label(db, 7)?;
+            assert!(std::ptr::eq(first, db.query::<label>(7)?.as_ref()));
+            assert_eq!(db.query_ref::<label>(8)?, "8");
+            assert_eq!(first, "7");
+            assert!(std::ptr::eq(first, db.query_ref::<label>(7)?));
+            Ok(())
+        })
     }
 }

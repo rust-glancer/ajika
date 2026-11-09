@@ -72,7 +72,7 @@ struct Number {
     value: u32,
 }
 
-#[ajika::query]
+#[ajika::query(returns(arc))]
 fn tree(db: &Db, file: u32) -> ajika::Result<String> {
     let text = Settings::at(()).text(db)?;
     Ok(format!(
@@ -83,7 +83,7 @@ fn tree(db: &Db, file: u32) -> ajika::Result<String> {
 
 #[ajika::query]
 fn symbols(db: &Db, file: u32) -> ajika::Result<String> {
-    Ok(format!("symbols:{}", tree(db, file)?))
+    Ok(format!("symbols:{}", db.query_ref::<tree>(file)?))
 }
 
 #[test]
@@ -227,7 +227,7 @@ fn forwarded_text(db: &Db) -> SharedResult<String> {
     Settings::at(()).text(db)
 }
 
-#[ajika::query(transient, forward)]
+#[ajika::query(transient, forward, returns(ref))]
 fn forwarded_syntax(db: &Db) -> SharedResult<Syntax> {
     parse(db)
 }
@@ -239,7 +239,7 @@ fn forwarding_reuses_input_and_non_cloneable_query_values() -> ajika::Result<()>
         let text = Settings::at(()).text(db)?;
         assert!(Arc::ptr_eq(&text, &forwarded_text(db)?));
         let syntax = parse(db)?;
-        assert!(Arc::ptr_eq(&syntax, &forwarded_syntax(db)?));
+        assert!(std::ptr::eq(syntax.as_ref(), forwarded_syntax(db)?));
         Ok(())
     })
 }

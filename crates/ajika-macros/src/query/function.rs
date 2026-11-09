@@ -2,7 +2,7 @@
 
 use proc_macro2::{Span, TokenStream};
 use quote::quote;
-use syn::{FnArg, Ident, ImplItemFn, ItemFn};
+use syn::{Ident, ImplItemFn, ItemFn};
 
 use super::provider::Provider;
 use crate::{
@@ -11,11 +11,7 @@ use crate::{
 };
 
 pub(super) fn expand(args: TokenStream, function: ItemFn) -> syn::Result<TokenStream> {
-    let options = Options::parse(
-        args,
-        &["name", "transient", "validate", "forward"],
-        syn::parse_quote!(::ajika),
-    )?;
+    let options = Options::parse(args, Options::FUNCTION, syn::parse_quote!(::ajika))?;
     Ok(Declaration::prepare(options, function)?.emit())
 }
 
@@ -29,13 +25,12 @@ impl Declaration {
         let signature = QuerySignature::analyze(&function.sig)?;
         let attributes = Attributes::prepare(&function.attrs)?;
         let provider_attributes = attributes.helpers();
-        let name = &function.sig.ident;
+        let name = function.sig.ident.clone();
         let parameter = Ident::new("__ajika_key", Span::mixed_site());
         let context = function.sig.inputs.first();
         let pattern = &signature.pattern;
         let result = &signature.result;
         let runtime = &options.runtime;
-        let value = signature.value_type(&options);
         let mut execute: ImplItemFn = syn::parse_quote! {
             fn execute(#context, #parameter: Self::Key) -> #runtime::Result<::std::sync::Arc<Self::Value>> {}
         };
@@ -52,7 +47,7 @@ impl Declaration {
             .block
             .stmts
             .insert(0, syn::parse_quote!(let #pattern = #parameter;));
-        function.sig.output = syn::parse_quote!(-> #runtime::Result<::std::sync::Arc<#value>>);
+        function.block = Box::new(signature.wrap(&mut function.sig, &options, &name));
 
         let provider = Provider::prepare(
             options,
@@ -63,14 +58,7 @@ impl Declaration {
             syn::parse_quote!(concat!(module_path!(), "::", stringify!(#name))),
             execute,
         );
-        let db = &signature.context_name;
-        let key = &signature.key;
         function.attrs = attributes.wrapper;
-        function.sig.inputs = std::iter::once(signature.context.clone())
-            .chain(signature.arguments.iter().cloned())
-            .map(FnArg::Typed)
-            .collect();
-        function.block = Box::new(syn::parse_quote!({ #db.query::<#name>(#key) }));
 
         Ok(Self {
             wrapper: function,

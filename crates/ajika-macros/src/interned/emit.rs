@@ -17,7 +17,7 @@ impl Declaration {
         let gates = &self.attributes.gates;
         let lint_policy = &self.attributes.inherited_lints;
         let stored_fields = &self.stored_fields;
-        let namespace = self.options.namespace.as_ref().map_or_else(
+        let namespace = self.options.name.as_ref().map_or_else(
             || quote!(concat!(module_path!(), "::", stringify!(#name))),
             |namespace| quote!(#namespace),
         );

@@ -18,6 +18,8 @@ pub mod __private;
 ///
 /// The generated provider implements [`Query`]. Query keys and persistent result values use
 /// [`Persist`], and the `validate` option implements [`Query::validate`].
+/// For a free query, pass its generated type to [`Db::query`] or [`Db::query_ref`] to choose
+/// an owned or borrowed answer at the call site.
 #[doc(inline)]
 pub use ajika_macros::query;
 pub use ajika_macros::{input, interned, output, register};

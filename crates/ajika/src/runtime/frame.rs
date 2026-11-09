@@ -130,7 +130,11 @@ impl Frame {
         Some(value)
     }
 
-    pub(crate) fn remember_query<Q: Query>(&self, key: Q::Key, value: Arc<Q::Value>) {
+    pub(crate) fn remember_query<Q: Query>(
+        &self,
+        key: Q::Key,
+        value: Arc<Q::Value>,
+    ) -> Arc<Q::Value> {
         let mut acquired = self.acquired.lock().expect("frame values");
         acquired
             .queries
@@ -138,7 +142,9 @@ impl Frame {
             .or_insert_with(|| Box::new(HashMap::<Q::Key, Arc<Q::Value>>::new()))
             .downcast_mut::<HashMap<Q::Key, Arc<Q::Value>>>()
             .expect("query table type")
-            .insert(key, value);
+            .entry(key)
+            .or_insert(value)
+            .clone()
     }
 
     /// End recording and hand the collected reads and outputs to the caller. For a query,
@@ -161,7 +167,7 @@ impl Frame {
 /// must never let a new consumer skip recording its dependency.
 #[derive(Default)]
 struct Acquired {
-    // Output::value_ref relies on these allocations staying owned until the frame ends.
+    // Borrowed reads rely on both maps keeping each acquired allocation until the frame ends.
     outputs: HashMap<Address, HashMap<Vec<u8>, Data>>,
     queries: HashMap<TypeId, Box<dyn Any + Send + Sync>>,
     hits: u64,

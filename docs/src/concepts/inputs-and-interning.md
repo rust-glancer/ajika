@@ -18,7 +18,7 @@ and keep the text in an input addressed by that ID:
 ```rust
 # extern crate ajika;
 
-#[ajika::interned(namespace = "source-files")]
+#[ajika::interned(name = "source-files")]
 struct FileId {
     path: String,
 }

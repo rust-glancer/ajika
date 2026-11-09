@@ -1,4 +1,4 @@
-//! Interned declarations need only a storage namespace and an optional renamed Ajika path.
+//! Interned declarations can override their stable name and the Ajika path.
 //! Field types and the declaration's name supply the rest of the contract.
 
 use proc_macro2::TokenStream;
@@ -6,14 +6,14 @@ use syn::{LitStr, Path, parse::Parser as _};
 
 pub(super) struct Options {
     pub(super) runtime: Path,
-    pub(super) namespace: Option<LitStr>,
+    pub(super) name: Option<LitStr>,
 }
 
 impl Options {
     pub(super) fn parse(tokens: TokenStream) -> syn::Result<Self> {
         let mut options = Self {
             runtime: syn::parse_quote!(::ajika),
-            namespace: None,
+            name: None,
         };
         let mut seen = Vec::new();
         syn::meta::parser(|meta| {
@@ -27,7 +27,7 @@ impl Options {
             }
             match name.as_str() {
                 "crate" => options.runtime = meta.value()?.parse()?,
-                "namespace" => options.namespace = Some(meta.value()?.parse()?),
+                "name" => options.name = Some(meta.value()?.parse()?),
                 _ => return Err(meta.error("unsupported interned option")),
             }
             seen.push(name);

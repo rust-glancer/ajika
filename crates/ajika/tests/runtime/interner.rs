@@ -6,7 +6,7 @@ use anyhow::Result;
 
 use super::{Db, inputs, retention};
 
-#[ajika::interned(namespace = "files")]
+#[ajika::interned(name = "files")]
 struct File {
     path: String,
 }

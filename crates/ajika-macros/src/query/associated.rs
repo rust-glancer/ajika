@@ -4,7 +4,7 @@
 use proc_macro2::{Span, TokenStream};
 use quote::{ToTokens as _, format_ident, quote};
 use syn::{
-    Attribute, ExprPath, FnArg, ImplItem, ImplItemFn, ItemImpl, LitStr, Meta, Path, Type, TypePath,
+    Attribute, ExprPath, ImplItem, ImplItemFn, ItemImpl, LitStr, Meta, Path, Type, TypePath,
     spanned::Spanned as _,
     visit_mut::{self, VisitMut as _},
 };
@@ -94,11 +94,7 @@ impl Implementation {
                     ));
                 }
             };
-            options = Some(Options::parse(
-                tokens,
-                &["name", "transient", "validate", "forward"],
-                runtime.clone(),
-            )?);
+            options = Some(Options::parse(tokens, Options::FUNCTION, runtime.clone())?);
         }
         Ok(options)
     }
@@ -146,7 +142,7 @@ impl Method {
     fn prepare(options: Options, owner: &TypePath, mut function: ImplItemFn) -> syn::Result<Self> {
         let signature = QuerySignature::analyze(&function.sig)?;
         let attributes = Attributes::prepare(&function.attrs)?;
-        let name = &function.sig.ident;
+        let name = function.sig.ident.clone();
         let marker = format_ident!("__AjikaQuery_{name}", span = Span::mixed_site());
         let helper = format_ident!("__ajika_execute_{name}", span = Span::mixed_site());
 
@@ -158,7 +154,6 @@ impl Method {
         let concrete = QuerySignature::analyze(&concrete)?;
         let context = &concrete.context;
         let runtime = &options.runtime;
-        let value = signature.value_type(&options);
         let db = &signature.context_name;
         let key = &signature.key;
         let arguments = signature.arguments.iter().map(|argument| &argument.pat);
@@ -175,15 +170,17 @@ impl Method {
                 #result
             }
         };
-        let output = syn::parse_quote!(-> #runtime::Result<::std::sync::Arc<#value>>);
         let owner_name = LitStr::new(
             &owner.to_token_stream().to_string().replace(' ', ""),
             owner.span(),
         );
+        let mut computation = function.clone();
+        function.block = signature.wrap(&mut function.sig, &options, &marker);
+
         let mut provider = Provider::prepare(
             options,
             &concrete,
-            marker.clone(),
+            marker,
             syn::Visibility::Inherited,
             attributes.helpers(),
             syn::parse_quote!(concat!(module_path!(), "::", #owner_name, "::", stringify!(#name))),
@@ -193,20 +190,12 @@ impl Method {
             paths.visit_expr_mut(validate);
         }
 
-        let mut computation = function.clone();
         computation.sig.ident = helper;
         computation.vis = syn::Visibility::Inherited;
         computation.attrs = attributes.gates;
         computation.attrs.extend(attributes.computation);
         computation.attrs.push(syn::parse_quote!(#[doc(hidden)]));
-
         function.attrs = attributes.wrapper;
-        function.sig.output = output;
-        function.sig.inputs = std::iter::once(signature.context)
-            .chain(signature.arguments)
-            .map(FnArg::Typed)
-            .collect();
-        function.block = syn::parse_quote!({ #db.query::<#marker>(#key) });
         Ok(Self {
             wrapper: function,
             computation,
