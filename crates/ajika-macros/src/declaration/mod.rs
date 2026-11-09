@@ -1,11 +1,18 @@
 //! Parse options and validate query signatures. This module prepares Rust syntax, not emitted
 //! items; the individual declaration modules own their emission templates.
 
-use proc_macro2::TokenStream;
+use proc_macro2::{Span, TokenStream};
 use syn::{
-    Expr, FnArg, Ident, LitStr, Pat, PatType, Path, ReturnType, Signature, Type,
-    parse::Parser as _, spanned::Spanned as _,
+    Block, Expr, FnArg, Ident, Lifetime, LitStr, Pat, PatType, Path, ReturnType, Signature, Type,
+    ext::IdentExt as _, parse::Parser as _, spanned::Spanned as _,
 };
+
+#[derive(Default)]
+enum ReturnMode {
+    #[default]
+    Arc,
+    Ref,
+}
 
 /// Shared option syntax, with the accepted names chosen by each macro. A query function takes
 /// `validate = path`; an enclosing impl accepts only `crate = path`. All forms accept that runtime
@@ -16,9 +23,12 @@ pub(crate) struct Options {
     pub(crate) validate: Option<Path>,
     pub(crate) transient: bool,
     pub(crate) forward: bool,
+    returns: ReturnMode,
 }
 
 impl Options {
+    pub(crate) const FUNCTION: &[&str] = &["name", "transient", "validate", "forward", "returns"];
+
     pub(crate) fn parse(tokens: TokenStream, allowed: &[&str], runtime: Path) -> syn::Result<Self> {
         let mut options = Self {
             runtime,
@@ -26,6 +36,7 @@ impl Options {
             validate: None,
             transient: false,
             forward: false,
+            returns: ReturnMode::default(),
         };
         let mut seen = Vec::new();
         syn::meta::parser(|meta| {
@@ -46,6 +57,19 @@ impl Options {
                 "validate" => options.validate = Some(meta.value()?.parse()?),
                 "transient" => options.transient = true,
                 "forward" => options.forward = true,
+                "returns" => {
+                    let arguments;
+                    syn::parenthesized!(arguments in meta.input);
+                    let mode = arguments.call(Ident::parse_any)?;
+                    if !arguments.is_empty() {
+                        return Err(arguments.error("expected one return mode"));
+                    }
+                    options.returns = match mode.to_string().as_str() {
+                        "arc" => ReturnMode::Arc,
+                        "ref" => ReturnMode::Ref,
+                        _ => return Err(syn::Error::new(mode.span(), "expected `arc` or `ref`")),
+                    };
+                }
                 _ => unreachable!("options were checked above"),
             }
             seen.push(name);
@@ -70,7 +94,7 @@ impl Options {
 pub(crate) struct QuerySignature {
     pub(crate) context: PatType,
     pub(crate) context_name: Ident,
-    pub(crate) context_type: Type,
+    context_type: Type,
     pub(crate) arguments: Vec<PatType>,
     pub(crate) key_type: Type,
     pub(crate) key: Expr,
@@ -79,6 +103,12 @@ pub(crate) struct QuerySignature {
 }
 
 impl QuerySignature {
+    /// Let Rust resolve the context type, including user-defined aliases.
+    pub(crate) fn services_type(&self, runtime: &Path) -> Type {
+        let context = &self.context_type;
+        syn::parse_quote!(<fn(&#context) as #runtime::__private::DbType>::Services)
+    }
+
     /// Rust resolves return-type aliases for us. Forwarding declarations already contain the
     /// shared pointer, while ordinary declarations name the value that Ajika will wrap.
     pub(crate) fn value_type(&self, options: &Options) -> Type {
@@ -86,6 +116,41 @@ impl QuerySignature {
         let result = &self.result;
         let forward = options.forward;
         syn::parse_quote!(<#result as #runtime::__private::ResultType<#forward>>::Value)
+    }
+
+    /// Give the generated entry point its caller-facing signature and body.
+    pub(crate) fn wrap(
+        &self,
+        signature: &mut Signature,
+        options: &Options,
+        provider: &Ident,
+    ) -> Block {
+        let runtime = &options.runtime;
+        let value = self.value_type(options);
+        let db = &self.context_name;
+        let key = &self.key;
+        let mut context = self.context.clone();
+        let body = match options.returns {
+            ReturnMode::Arc => {
+                signature.output = syn::parse_quote!(-> #runtime::Result<::std::sync::Arc<#value>>);
+                syn::parse_quote!({ #db.query::<#provider>(#key) })
+            }
+            ReturnMode::Ref => {
+                // Name the lifetime inside Db so a short borrow of the context can still
+                // return a reference that lasts for the operation.
+                let lifetime = Lifetime::new("'__ajika_db", Span::mixed_site());
+                let services = self.services_type(runtime);
+                signature.generics.params.push(syn::parse_quote!(#lifetime));
+                context.ty = syn::parse_quote!(&#runtime::Db<#lifetime, #services>);
+                signature.output = syn::parse_quote!(-> #runtime::Result<&#lifetime #value>);
+                syn::parse_quote!({ #db.query_ref::<#provider>(#key) })
+            }
+        };
+        signature.inputs = std::iter::once(context)
+            .chain(self.arguments.iter().cloned())
+            .map(FnArg::Typed)
+            .collect();
+        body
     }
 
     pub(crate) fn analyze(signature: &Signature) -> syn::Result<Self> {

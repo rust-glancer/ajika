@@ -32,11 +32,7 @@ impl Provider {
         execute: ImplItemFn,
     ) -> Self {
         let runtime = &options.runtime;
-        let context_type = &signature.context_type;
-        // Let Rust resolve aliases and elided Db lifetimes, rather than interpreting the
-        // application's type names in the macro.
-        let services =
-            syn::parse_quote!(<fn(&#context_type) as #runtime::__private::DbType>::Services);
+        let services = signature.services_type(runtime);
         let value = signature.value_type(&options);
         let identity = options
             .name

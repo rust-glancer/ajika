@@ -12,7 +12,7 @@ use crate::document::{Location, ParsedDocument, Target};
 
 pub(crate) type Db<'a> = ajika::Db<'a, Activity>;
 
-#[ajika::interned(namespace = "handbook-documents")]
+#[ajika::interned(name = "handbook-documents")]
 pub(crate) struct DocumentId {
     path: String,
 }

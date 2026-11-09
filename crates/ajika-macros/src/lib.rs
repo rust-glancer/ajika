@@ -1,7 +1,7 @@
 //! Declare Ajika queries, typed inputs, output handles, and interned IDs.
 //!
 //! - [`query`] turns a function into a reusable computation. A body returning `Result<T>` normally
-//!   gives callers `Result<Arc<T>>`.
+//!   gives callers `Result<Arc<T>>` and can opt into `Result<&'db T>`.
 //! - [`input`] generates getters and setters for independently tracked input fields.
 //! - [`output`] generates handles for separately readable query outputs.
 //! - [`interned`] gives a set of immutable fields a compact ID and generates getters for them.
@@ -17,7 +17,7 @@ use proc_macro::TokenStream;
 
 /// Declare a synchronous query whose body returns `Result<T>`.
 ///
-/// The generated function returns `Result<Arc<T>>`, wrapping each successfully computed value.
+/// The generated function returns `Result<Arc<T>>` by default.
 /// The first argument is an immutable database context; the remaining owned arguments form
 /// the query key. Reuse depends on reads through that context. The body must give equivalent
 /// answers for equivalent observations, and required side effects belong outside queries
@@ -30,6 +30,8 @@ use proc_macro::TokenStream;
 ///
 /// | Option | Behavior |
 /// | --- | --- |
+/// | `returns(arc)` | Return an owned `Arc<T>`. This is the default. |
+/// | `returns(ref)` | Borrow the answer as `&'db T` for the lifetime of the query context. |
 /// | `forward` | The body returns `Result<Arc<T>>`; reuse its Arc instead of wrapping an owned value. |
 /// | `transient` | Keep the primary value only during the operation, without requiring serialization or equality. Dependency metadata can still be retained. |
 /// | `name = "..."` | Override the query's stable name. It must be unique within the database's query registry. |
@@ -108,7 +110,7 @@ pub fn output(args: TokenStream, input: TokenStream) -> TokenStream {
 /// owned getter returning `Result<T>`. IDs implement Copy, equality, ordering, Hash, Debug and
 /// wincode serialization. Additional derives apply to the ID, not its stored fields.
 ///
-/// The optional `namespace = "..."` overrides the declaration's module-qualified name.
+/// The optional `name = "..."` overrides the declaration's module-qualified storage name.
 /// Each declaration has one numbering space per database; include context in the fields
 /// when it contributes to identity.
 /// `crate = path` supports a renamed Ajika import. Declarations cannot be generic.

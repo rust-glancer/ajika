@@ -18,7 +18,7 @@ impl Scaled {
         Ok(Self::from_value(offset))
     }
 
-    #[ajika::query(forward, validate = Self::validate)]
+    #[ajika::query(forward, returns(ref), validate = Self::validate)]
     fn forwarded(db: &Db<'_>, offset: u32) -> ajika::Result<Arc<Self>> {
         Self::captured(db, offset)
     }
@@ -61,7 +61,8 @@ fn associated_queries_share_results_and_keep_owners_distinct() -> Result<()> {
         let scaled = Scaled::captured(db, 3)?;
         assert_eq!(scaled.value(), 6);
         assert!(Arc::ptr_eq(&scaled, &Scaled::captured(db, 3)?));
-        assert!(Arc::ptr_eq(&scaled, &Scaled::forwarded(db, 3)?));
+        let forwarded: for<'db> fn(&Db<'db>, u32) -> ajika::Result<&'db Scaled> = Scaled::forwarded;
+        assert!(std::ptr::eq(scaled.as_ref(), forwarded(db, 3)?));
         assert_eq!(Unscaled::captured(db, 3)?.value(), 3);
         assert_eq!(Scaled::from_previous(db, Scaled(6), 1)?.value(), 7);
         Ok(())

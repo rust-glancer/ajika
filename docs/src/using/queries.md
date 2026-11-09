@@ -48,6 +48,60 @@ Both `words` and `note_words` return `Result<Arc<Vec<String>>>` to their callers
 
 The `forward` option works on associated queries too.
 
+## Borrow the answer for an operation
+
+Use `returns(ref)` when callers only need to read the answer during the operation.
+The body still returns `Result<T>`, and the generated function returns
+`Result<&'db T>`.
+
+```rust
+# extern crate ajika;
+use ajika::{Db, Result};
+
+#[ajika::query(returns(ref))]
+fn label(_db: &Db<'_>, id: u32) -> Result<String> {
+    Ok(format!("file-{id}"))
+}
+
+fn label_text<'db>(db: &Db<'db>, id: u32) -> Result<&'db str> {
+    Ok(label(db, id)?.as_str())
+}
+```
+
+`returns(arc)` spells out the default for callers that need an owned answer.
+Both modes work on free and associated queries and can be combined with `forward`.
+
+## Call a query explicitly
+
+A free `#[ajika::query]` function also generates a query type with the same name.
+Pass that type to `db.query::<Q>(key)` for an `Arc` or to `db.query_ref::<Q>(key)`
+for a borrow. Both calls use the same cached answer and track the same dependency.
+They let you choose the return mode at the call site.
+
+```rust
+# extern crate ajika;
+use std::sync::Arc;
+use ajika::{Db, Result};
+
+#[ajika::query(returns(ref))]
+fn location(_db: &Db<'_>, file: u32, line: u32) -> Result<String> {
+    Ok(format!("{file}:{line}"))
+}
+
+fn keep_location(db: &Db<'_>) -> Result<Arc<String>> {
+    db.query::<location>((4, 12))
+}
+
+fn borrow_location<'db>(db: &Db<'db>) -> Result<&'db String> {
+    db.query_ref::<location>((4, 12))
+}
+```
+
+Use `()` for a query with no key arguments, the argument itself for one, and a
+tuple in argument order for several. For a handwritten query, use the type that
+implements `Query` and pass its `Query::Key`. For associated queries, call the
+generated associated function with its declared return mode.
+
 ## Put a query beside a natural owner
 
 An associated query can make a constructor-like computation easier to find:

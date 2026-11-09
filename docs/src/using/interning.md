@@ -10,7 +10,7 @@ For example, a file path can identify a file while its contents change:
 # extern crate ajika;
 use ajika::{Database, Result};
 
-#[ajika::interned(namespace = "source-files")]
+#[ajika::interned(name = "source-files")]
 struct FileId {
     path: String,
 }
@@ -28,8 +28,8 @@ fn intern_file(database: &Database, canonical_path: String) -> Result<FileId> {
 
 The generated ID is copyable, comparable, hashable, and serializable. You do not
 convert integers or manually encode keys. Each declaration has one numbering space
-per database. The explicit namespace is optional; its default includes the module
-and type name.
+per database. By default, Ajika names that space after the module and type. Use
+`name = "..."` to keep the same numbering space across a Rust rename.
 
 ## Choose what to intern
 
