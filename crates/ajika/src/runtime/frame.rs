@@ -8,7 +8,7 @@
 
 use std::{
     any::{Any, TypeId},
-    collections::{BTreeMap, HashMap, HashSet},
+    collections::{BTreeMap, HashMap, HashSet, hash_map::Entry},
     sync::{Arc, Mutex},
 };
 
@@ -88,14 +88,32 @@ impl Frame {
         Ok(Some(value))
     }
 
-    pub(crate) fn remember(&self, producer: &Address, slot: &[u8], value: Data) {
-        self.acquired
-            .lock()
-            .expect("frame values")
+    /// Keep the first allocation observed for this slot. Rebuilding a transient primary
+    /// value can replace the producer's memoized outputs, even while callers borrow them.
+    /// If two reads race to fill the frame's cache, both must return the allocation it keeps.
+    pub(crate) fn remember<T: Send + Sync + 'static>(
+        &self,
+        producer: &Address,
+        slot: &[u8],
+        value: Arc<T>,
+    ) -> Result<Arc<T>> {
+        let mut acquired = self.acquired.lock().expect("frame values");
+        match acquired
             .outputs
             .entry(producer.clone())
             .or_default()
-            .insert(slot.to_vec(), value);
+            .entry(slot.to_vec())
+        {
+            Entry::Occupied(entry) => entry
+                .get()
+                .clone()
+                .downcast()
+                .map_err(|_| Error::invariant("query value type changed")),
+            Entry::Vacant(entry) => {
+                entry.insert(value.clone());
+                Ok(value)
+            }
+        }
     }
 
     /// Ordinary query calls use their typed key directly, avoiding serialization merely to
@@ -143,6 +161,7 @@ impl Frame {
 /// must never let a new consumer skip recording its dependency.
 #[derive(Default)]
 struct Acquired {
+    // Output::value_ref relies on these allocations staying owned until the frame ends.
     outputs: HashMap<Address, HashMap<Vec<u8>, Data>>,
     queries: HashMap<TypeId, Box<dyn Any + Send + Sync>>,
     hits: u64,

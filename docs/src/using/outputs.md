@@ -39,6 +39,10 @@ This records a dependency on the set returned by `analyze`, then on the
 `words` output read through its handle. It does not read or depend on the
 `locations` payload.
 
+Use `output.value_ref(db)` to borrow an output for the lifetime of the query
+context. It records the same dependency as `output.value(db)`, which gives
+you an `Arc` you can keep after the operation.
+
 Try the whitespace edit:
 
 ```rust
