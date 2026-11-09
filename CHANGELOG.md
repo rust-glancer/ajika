@@ -1,5 +1,12 @@
 # Changelog
 
+## [0.1.3](https://github.com/rust-glancer/ajika/compare/v0.1.2...v0.1.3) (2026-11-09)
+
+
+### Features
+
+* Add value_ref to get &T instead of Arc&lt;T&gt; ([#8](https://github.com/rust-glancer/ajika/issues/8)) ([f8fbaf7](https://github.com/rust-glancer/ajika/commit/f8fbaf7ece6350e0157e760bdf246fd88ad0dd42))
+
 ## [0.1.2](https://github.com/rust-glancer/ajika/compare/v0.1.1...v0.1.2) (2026-11-07)
 
 
