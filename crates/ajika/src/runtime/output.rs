@@ -63,7 +63,8 @@ struct Identity {
 /// The handle holds an address, not the table or a particular version of it. Keeping or saving
 /// the handle does not keep the table in memory. Two handles for the same query/key/slot compare
 /// equal even when its data changes, allowing a set of output handles to remain equal. Reading
-/// through [`value`](Output::value) establishes the separate dependency on the data actually used.
+/// through [`value`](Output::value) or [`value_ref`](Output::value_ref) establishes the separate
+/// dependency on the data actually used.
 pub struct Output<T> {
     identity: Identity,
     marker: PhantomData<fn() -> T>,
@@ -87,6 +88,16 @@ impl<T: Persist + PartialEq + Send + Sync + 'static> Output<T> {
     /// no longer emits this slot, the handle cannot supply a value and the read returns an error.
     pub fn value<S: Send + Sync + 'static>(&self, db: &Db<'_, S>) -> Result<Arc<T>> {
         db.output_value(&self.identity.producer, &self.identity.slot)
+    }
+
+    /// Read this output with the same dependency tracking as [`value`](Self::value).
+    /// The reference lasts for the lifetime of the supplied [`Db`], even if the handle
+    /// is dropped first. Use `value` to keep the answer after the operation ends.
+    pub fn value_ref<'db, S: Send + Sync + 'static>(&self, db: &Db<'db, S>) -> Result<&'db T> {
+        let value = db.output_value(&self.identity.producer, &self.identity.slot)?;
+        // SAFETY: output_value returns the Arc kept in db's frame. The frame never
+        // removes or replaces acquired outputs and is borrowed for 'db.
+        Ok(unsafe { &*Arc::as_ptr(&value) })
     }
 }
 
@@ -151,5 +162,44 @@ unsafe impl<'de, T, C: wincode::config::Config> SchemaRead<'de, C> for Output<T>
             marker: PhantomData,
         });
         Ok(())
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use std::{sync::Arc, time::Duration};
+
+    use super::{Address, Output, OutputSlot};
+    use crate::{Database, Inputs, Result, Retention};
+
+    #[test]
+    fn borrowed_output_survives_a_second_publication() -> Result<()> {
+        let mut database = Database::memory(
+            Inputs::default(),
+            (),
+            Retention {
+                max_entries: 1,
+                max_bytes: 1024,
+                max_idle: Duration::from_secs(60),
+            },
+        );
+        database.run(|db| {
+            let producer = Address::new("producer", &())?;
+            let slot = "text".encode()?;
+
+            // The frame is the sole owner, as it can be after a producer rebuilds its memo.
+            db.frame
+                .remember(&producer, &slot, Arc::new(String::from("hello")))?;
+            let borrowed = Output::<String>::new(producer.clone(), slot.clone()).value_ref(db)?;
+
+            // Simulate a second reader publishing a different allocation for the same slot
+            // after losing the race to fill the frame cache.
+            let published = db
+                .frame
+                .remember(&producer, &slot, Arc::new(String::from("hello")))?;
+            assert_eq!(borrowed, "hello");
+            assert!(std::ptr::eq(borrowed, published.as_ref()));
+            Ok(())
+        })
     }
 }

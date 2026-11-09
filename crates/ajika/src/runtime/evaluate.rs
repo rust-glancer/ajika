@@ -119,6 +119,7 @@ impl<S: Send + Sync + 'static> Db<'_, S> {
     /// obtain this particular value, and record its version in the caller's frame.
     /// The selector already identifies the query and slot, so there is no need to load its
     /// ordinary return value first or depend on versions of sibling outputs.
+    /// The frame retains the returned allocation for as long as the frame can be borrowed.
     pub(crate) fn output_value<T: Persist + PartialEq + Send + Sync + 'static>(
         &self,
         address: &Address,
@@ -168,9 +169,7 @@ impl<S: Send + Sync + 'static> Db<'_, S> {
                 header.lifetime,
             );
             self.frame
-                .remember(address, slot.as_ref().expect("named output"), value.clone());
-
-            Ok(value)
+                .remember(address, slot.as_ref().expect("named output"), value)
         })
     }
 

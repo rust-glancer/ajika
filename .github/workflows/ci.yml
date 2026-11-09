@@ -63,6 +63,23 @@ jobs:
       - name: Run workspace tests and doctests
         run: just test
 
+  miri:
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+    env:
+      MIRI_TOOLCHAIN: nightly-2026-10-08
+    steps:
+      - uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd # v6
+        with:
+          persist-credentials: false
+      - name: Install Miri
+        run: rustup toolchain install "$MIRI_TOOLCHAIN" --profile minimal --component miri --component rust-src
+      - name: Run Ajika unit tests under Miri
+        env:
+          # Starting a database operation reads the wall clock for retention.
+          MIRIFLAGS: -Zmiri-disable-isolation
+        run: cargo "+$MIRI_TOOLCHAIN" miri test --locked -p ajika --lib
+
   docs:
     runs-on: ubuntu-latest
     timeout-minutes: 15
@@ -101,7 +118,7 @@ jobs:
     if: always()
     runs-on: ubuntu-latest
     timeout-minutes: 5
-    needs: [lints, tests, docs]
+    needs: [lints, tests, miri, docs]
     steps:
       - name: Decide on PR checks
         uses: re-actors/alls-green@05ac9388f0aebcb5727afa17fcccfecd6f8ec5fe # v1.2.2

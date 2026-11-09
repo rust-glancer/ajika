@@ -7,9 +7,9 @@ use super::{Db, Settings, Sources, declarations, diagnostics, inputs, retention}
 
 #[ajika::query]
 fn repeated_output(db: &Db, output: Output<String>, consumer: u32) -> ajika::Result<String> {
-    let value = output.value(db)?;
+    let value = output.value_ref(db)?;
     for _ in 0..100 {
-        assert!(Arc::ptr_eq(&value, &output.value(db)?));
+        assert!(std::ptr::eq(value, output.value(db)?.as_ref()));
     }
     Ok(format!("{consumer}:{value}"))
 }
@@ -38,6 +38,30 @@ fn repeated_output_reads_remain_dependencies_in_every_consumer() -> Result<()> {
         assert_eq!(*db.run(parallel_outputs)?, expected);
         assert_eq!(db.statistics().executed, expected_executions, "{text:?}");
     }
+    Ok(())
+}
+
+#[ajika::query(transient)]
+fn transient_output(db: &Db) -> ajika::Result<Output<String>> {
+    db.output("text", Settings::at(()).text(db)?)
+}
+
+#[test]
+fn borrowed_output_survives_reconstructing_its_producer() -> Result<()> {
+    let directory = tempfile::tempdir()?;
+    let mut db = Database::open(directory.path(), "test", inputs("hello"), (), retention())?;
+    let output = db.run(|db| Ok(transient_output(db)?.as_ref().clone()))?;
+
+    db.run(|db| {
+        let text = output.clone().value_ref(db)?;
+        // The slot can be decoded on its own. Requesting the transient primary value
+        // then reruns the producer and installs a new set of outputs in its memo.
+        transient_output(db)?;
+        assert_eq!(text, "hello");
+        Ok(())
+    })?;
+    assert_eq!(db.statistics().decoded, 1);
+    assert_eq!(db.statistics().executed, 1);
     Ok(())
 }
 
