@@ -193,13 +193,15 @@ impl<S: Services> Database<S> {
     }
 
     /// Publish a coherent batch of typed input changes. Errors discard the private batch.
+    /// On success, return the callback's value after publishing the batch.
     /// Equal values keep their validity proofs; changed retention policies are observed too.
-    pub fn update_inputs(
+    pub fn update_inputs<R>(
         &mut self,
-        edit: impl FnOnce(&mut crate::InputUpdate) -> Result<()>,
-    ) -> Result<()> {
-        self.replace_inputs(self.inputs.edit(edit)?);
-        Ok(())
+        edit: impl FnOnce(&mut crate::InputUpdate) -> Result<R>,
+    ) -> Result<R> {
+        let (inputs, value) = self.inputs.edit_with_result(edit)?;
+        self.replace_inputs(inputs);
+        Ok(value)
     }
 
     /// Bound work retained for session inputs. The default is 64 MiB of estimated encoded data,
