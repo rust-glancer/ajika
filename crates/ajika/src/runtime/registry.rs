@@ -89,7 +89,11 @@ impl<S: Services> Registry<S> {
     /// Read the current stamp and reuse policy for a saved input address. None means its declaration
     /// is no longer registered, so the old dependency cannot establish the parent's validity.
     pub(crate) fn stamp(&self, db: &Db<'_, S>, address: &Address) -> Result<Option<InputRecord>> {
-        self.inputs
-            .stamp(&db.operation.database.inputs, &address.family, &address.key)
+        self.inputs.stamp(
+            &db.operation.database.inputs,
+            &address.family,
+            &address.key,
+            db,
+        )
     }
 }

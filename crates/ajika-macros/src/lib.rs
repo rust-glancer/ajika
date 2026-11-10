@@ -68,6 +68,7 @@ pub fn register(args: TokenStream, input: TokenStream) -> TokenStream {
 /// Declare keyed input fields with tracked getters, batch setters, and automatic registration.
 /// `key = Type` is required. Fields may override `stamp`, `initialize`, `durability`, and `lifetime`
 /// with `#[input(...)]`; ordinary fields use their encoded value as a fingerprint.
+/// An initializer receives `&Key` and `&dyn ajika::InputInit`.
 /// `#[input(arc)] field: T` shares its value through an Arc: setters and initializers accept
 /// owned values or existing Arcs, and getters return `Result<Arc<T>>`. Stamp and policy callbacks
 /// inspect `&T`. See the book's [input guide](https://rust-glancer.github.io/ajika/using/inputs.html).

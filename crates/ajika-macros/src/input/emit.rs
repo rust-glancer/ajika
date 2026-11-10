@@ -112,12 +112,14 @@ impl Field {
         let initialize = options.initialize.as_ref().map(|initialize| {
             // Lazy acquisition accepts the same owned-or-shared values as an explicit setter.
             let acquire = if options.arc {
-                quote!(#initialize(key).map(::core::convert::Into::into))
+                quote!(#initialize(key, cx).map(::core::convert::Into::into))
             } else {
-                quote!(#initialize(key))
+                quote!(#initialize(key, cx))
             };
             quote! {
-                fn initialize(key: &Self::Key) -> #runtime::Result<Self::Value> { #acquire }
+                fn initialize(key: &Self::Key, cx: &dyn #runtime::InputInit) -> #runtime::Result<Self::Value> {
+                    #acquire
+                }
             }
         });
         let durability = options

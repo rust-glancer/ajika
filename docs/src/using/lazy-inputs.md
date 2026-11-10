@@ -6,17 +6,25 @@ Later reads of that captured field receive the same observation.
 
 ## Capture once, then read
 
-The initializer receives the input key:
+The initializer receives the input key and an `InputInit` context. For a file
+keyed by an interned ID, use the context's interner to look up its path.
 
 ```rust
 # extern crate ajika;
-use ajika::Result;
+use ajika::{InputInit, Result};
 
-fn acquire_text(path: &String) -> Result<String> {
+#[ajika::interned]
+struct FileId {
+    path: String,
+}
+
+fn acquire_text(id: &FileId, cx: &dyn InputInit) -> Result<String> {
+    cx.check_cancelled()?;
+    let path = id.path(&cx.interner())?;
     std::fs::read_to_string(path).map_err(ajika::Error::application)
 }
 
-#[ajika::input(key = String)]
+#[ajika::input(key = FileId)]
 struct File {
     #[input(arc, initialize = acquire_text)]
     text: String,
@@ -34,8 +42,9 @@ The initializer runs outside the input table's lock. If two successful
 initializations race for the same entry, both reads return the first value
 installed.
 
-An initializer has no query context or services argument. It acquires external
-data; it is not another query with dependencies.
+An initializer captures external data. During a query read or cache validation,
+`check_cancelled()` polls the active operation. For long acquisitions, call it
+between chunks and return the error to abandon the capture.
 
 ## The host decides when to reacquire
 
@@ -44,8 +53,8 @@ newly captured text in an input batch or forget the old capture:
 
 ```rust
 # extern crate ajika;
-# use ajika::{Database, Result};
-# fn acquire_text(path: &String) -> Result<String> {
+# use ajika::{Database, InputInit, Result};
+# fn acquire_text(path: &String, _cx: &dyn InputInit) -> Result<String> {
 #     std::fs::read_to_string(path).map_err(ajika::Error::application)
 # }
 # #[ajika::input(key = String)]
@@ -84,10 +93,10 @@ sees published stamps and reads through its input interface.
 ## Inspecting inputs from the host
 
 The generated field selector, such as `File::TEXT`, also works with
-`Inputs::get`: for example, `inputs.get(File::TEXT, &path)`.
-This can initialize a value outside query execution; there is no
-calling query to record a dependency for. `peek` and `entries` inspect already
-captured data without triggering acquisition.
+`Inputs::get`, for example `inputs.get(File::TEXT, &id, &database)`.
+You can also pass `&interner` directly, using the same interner that created
+the ID. Both host contexts use a no-op cancellation check. `peek` and `entries`
+inspect already captured data without triggering acquisition.
 
 Inside a query, use the tracked getter with its `Db`. A host-side peek hidden in
 a service would bypass dependency tracking.

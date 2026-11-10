@@ -113,7 +113,13 @@ impl Host {
         let mut replacements = Vec::new();
         for (path, text) in captured {
             let id = DocumentId::new(&interner, path.clone())?;
-            if self.saved.get(Document::SOURCE, &id)?.text.as_deref() != Some(&text) {
+            if self
+                .saved
+                .get(Document::SOURCE, &id, &interner)?
+                .text
+                .as_deref()
+                != Some(&text)
+            {
                 replacements.push((id, Some(Arc::new(text))));
             }
             files.insert(path, id);
@@ -155,7 +161,7 @@ impl Host {
         }
         let id = self.id(path)?;
         self.saved
-            .get(Document::SOURCE, &id)?
+            .get(Document::SOURCE, &id, &self.database)?
             .text
             .context("document no longer exists")
     }
@@ -179,7 +185,7 @@ impl Host {
         if *self.text(path)? == text {
             return Ok(());
         }
-        let saved = self.saved.get(Document::SOURCE, &id)?.text;
+        let saved = self.saved.get(Document::SOURCE, &id, &self.database)?.text;
         let draft = if saved.as_deref().is_some_and(|saved| *saved == text) {
             None
         } else {
@@ -229,7 +235,11 @@ impl Host {
         };
         let id = self.id(&draft.path)?;
         anyhow::ensure!(
-            self.saved.get(Document::SOURCE, &id)?.text.as_deref() == Some(&*draft.base),
+            self.saved
+                .get(Document::SOURCE, &id, &self.database)?
+                .text
+                .as_deref()
+                == Some(&*draft.base),
             "the file changed on disk; copy your draft elsewhere or discard it before saving"
         );
         // Saving is a host effect. A memoized query must never be responsible for writing

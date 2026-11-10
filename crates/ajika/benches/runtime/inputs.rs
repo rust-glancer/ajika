@@ -25,7 +25,7 @@ fn edit_saved_inputs(bencher: Bencher, files: u32) {
         publish(&mut database);
         let edited = database
             .inputs()
-            .get(File::SOURCE, &0)
+            .get(File::SOURCE, &0, &database)
             .expect("published source");
         assert_eq!(
             edited.text,
@@ -50,14 +50,17 @@ fn publish_editor_overlay(bencher: Bencher, files: u32) {
         publish(&mut database);
         let draft = database
             .inputs()
-            .get(File::SOURCE, &0)
+            .get(File::SOURCE, &0, &database)
             .expect("draft source");
         assert_eq!(
             draft.text,
             sources.source(Edit::Meaning, Lifetime::Session).text
         );
         assert_eq!(draft.lifetime, Lifetime::Session);
-        let saved = sources.saved.get(File::SOURCE, &0).expect("saved source");
+        let saved = sources
+            .saved
+            .get(File::SOURCE, &0, &database)
+            .expect("saved source");
         assert_eq!(
             saved.text,
             sources.source(Edit::Original, Lifetime::Persistent).text

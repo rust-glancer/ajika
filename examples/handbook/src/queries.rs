@@ -4,7 +4,7 @@
 
 use std::sync::{Arc, Mutex};
 
-use ajika::{Lifetime, Stamp};
+use ajika::{InputInit, Lifetime, Stamp};
 use serde::Serialize;
 use wincode::{SchemaRead, SchemaWrite};
 
@@ -26,7 +26,7 @@ pub(crate) struct Source {
 }
 
 impl Source {
-    fn missing(_key: &DocumentId) -> ajika::Result<Self> {
+    fn missing(_key: &DocumentId, _cx: &dyn InputInit) -> ajika::Result<Self> {
         Ok(Self {
             text: None,
             lifetime: Lifetime::Persistent,
