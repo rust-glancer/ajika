@@ -84,7 +84,7 @@ impl<'db, S: Services> Db<'db, S> {
     pub fn input<T: Input>(&self, key: T::Key) -> Result<T::Value> {
         self.handle(|| {
             self.check_cancelled()?;
-            let captured = self.operation.database.inputs.read::<T>(&key)?;
+            let captured = self.operation.database.inputs.read::<T>(&key, self)?;
             self.frame.depend(
                 Dependency::Input(Address::new(T::NAME, &key)?, captured.record.stamp),
                 captured.record.durability,

@@ -3,12 +3,12 @@
 
 use std::{any::TypeId, collections::HashMap};
 
-use super::{Input, Inputs, Record};
+use super::{Input, InputInit, Inputs, Record};
 use crate::{__private::Registration, Result, codec};
 
 struct Entry {
     identity: TypeId,
-    read: fn(&Inputs, &[u8]) -> Result<Record>,
+    read: fn(&Inputs, &[u8], &dyn InputInit) -> Result<Record>,
 }
 
 pub(crate) struct Registry(HashMap<&'static str, Entry>);
@@ -25,7 +25,7 @@ impl Registry {
     pub(crate) fn input<T: Input>(&mut self) {
         let entry = Entry {
             identity: TypeId::of::<T>(),
-            read: |inputs, key| inputs.record::<T>(&codec::decode(key)?),
+            read: |inputs, key, cx| inputs.record::<T>(&codec::decode(key)?, cx),
         };
         if let Some(previous) = self.0.insert(T::NAME, entry) {
             assert_eq!(
@@ -37,10 +37,16 @@ impl Registry {
         }
     }
 
-    pub(crate) fn stamp(&self, inputs: &Inputs, name: &str, key: &[u8]) -> Result<Option<Record>> {
+    pub(crate) fn stamp(
+        &self,
+        inputs: &Inputs,
+        name: &str,
+        key: &[u8],
+        cx: &dyn InputInit,
+    ) -> Result<Option<Record>> {
         self.0
             .get(name)
-            .map(|entry| (entry.read)(inputs, key))
+            .map(|entry| (entry.read)(inputs, key, cx))
             .transpose()
     }
 }

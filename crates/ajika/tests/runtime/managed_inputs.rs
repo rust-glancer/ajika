@@ -2,7 +2,7 @@
 
 use std::{fs, sync::Arc};
 
-use ajika::{Database, Durability, Inputs, Lifetime, Stamp};
+use ajika::{Database, Durability, InputInit, Inputs, Interner, Lifetime, Stamp};
 use anyhow::Result;
 
 use super::retention;
@@ -63,21 +63,28 @@ fn field_updates_are_private_until_published_and_saved_inputs_can_be_restored() 
     Ok(())
 }
 
-#[ajika::input(key = String)]
+#[ajika::interned]
+struct FileId {
+    path: String,
+}
+
+#[ajika::input(key = FileId)]
 struct File {
     #[input(arc, initialize = File::load)]
     text: String,
 }
 
 impl File {
-    fn load(path: &String) -> ajika::Result<String> {
+    fn load(id: &FileId, cx: &dyn InputInit) -> ajika::Result<String> {
+        cx.check_cancelled()?;
+        let path = id.path(&cx.interner())?;
         fs::read_to_string(path).map_err(ajika::Error::application)
     }
 }
 
 #[ajika::query]
-fn length(db: &Db, path: String) -> ajika::Result<usize> {
-    Ok(File::at(path).text(db)?.len())
+fn length(db: &Db, id: FileId) -> ajika::Result<usize> {
+    Ok(File::at(id).text(db)?.len())
 }
 
 #[test]
@@ -90,20 +97,18 @@ fn lazy_inputs_are_shared_with_the_host_and_recaptured_on_restart() -> Result<()
         .expect("temporary path")
         .to_owned();
     let storage = directory.path().join("queries");
-    let file = File::at(path.clone());
     for (contents, expected_executions) in [("one", 1), ("one", 0), ("longer", 1)] {
         fs::write(&path, contents)?;
         let sources = Inputs::default();
         // The database adds configuration over these source tables. A hit must still capture
         // the source in those tables so the host can validate it before accepting its project.
         let mut database = Database::open(&storage, "inputs", sources.overlay(), (), retention())?;
-        assert_eq!(
-            *database.run(|db| length(db, path.clone()))?,
-            contents.len()
-        );
+        let id = FileId::new(&database.interner(), path.clone())?;
+        let file = File::at(id);
+        assert_eq!(*database.run(|db| length(db, id))?, contents.len());
         assert_eq!(database.statistics().executed, expected_executions);
         let captured = sources
-            .peek(File::TEXT, &path)
+            .peek(File::TEXT, &id)
             .expect("validation captured the input");
         database.run(|db| {
             let values = db.parallel_map(&[0, 1, 2, 3], |db, _| file.text(db))?;
@@ -116,20 +121,23 @@ fn lazy_inputs_are_shared_with_the_host_and_recaptured_on_restart() -> Result<()
 
 #[test]
 fn editor_overrides_leave_the_saved_values_and_other_files_shared() -> Result<()> {
+    let interner = Interner::default();
+    let a = FileId::new(&interner, "a".into())?;
+    let b = FileId::new(&interner, "b".into())?;
     let shared = Arc::new("second".to_owned());
     let saved = Inputs::default().edit(|update| {
-        File::at("a".into()).set_text(update, "first".to_owned())?;
-        File::at("b".into()).set_text(update, shared.clone())
+        File::at(a).set_text(update, "first".to_owned())?;
+        File::at(b).set_text(update, shared.clone())
     })?;
     let editor = saved
         .overlay()
-        .edit(|update| File::at("a".into()).set_text(update, "edited".to_owned()))?;
-    assert_eq!(&*saved.get(File::TEXT, &"a".into())?, "first");
-    assert_eq!(&*editor.get(File::TEXT, &"a".into())?, "edited");
-    assert!(Arc::ptr_eq(&shared, &saved.get(File::TEXT, &"b".into())?));
+        .edit(|update| File::at(a).set_text(update, "edited".to_owned()))?;
+    assert_eq!(&*saved.get(File::TEXT, &a, &interner)?, "first");
+    assert_eq!(&*editor.get(File::TEXT, &a, &interner)?, "edited");
+    assert!(Arc::ptr_eq(&shared, &saved.get(File::TEXT, &b, &interner)?));
     assert!(Arc::ptr_eq(
-        &saved.get(File::TEXT, &"b".into())?,
-        &editor.get(File::TEXT, &"b".into())?
+        &saved.get(File::TEXT, &b, &interner)?,
+        &editor.get(File::TEXT, &b, &interner)?
     ));
     Ok(())
 }
@@ -144,15 +152,18 @@ fn forgetting_an_observation_recaptures_it_without_changing_the_saved_snapshot()
         .into_owned();
     fs::write(&path, "before")?;
     let saved = Inputs::default();
-    assert_eq!(&*saved.get(File::TEXT, &path)?, "before");
+    let database = Database::memory(saved.clone(), (), retention());
+    let interner = database.interner();
+    let id = FileId::new(&interner, path.clone())?;
+    assert_eq!(&*saved.get(File::TEXT, &id, &database)?, "before");
 
     fs::write(&path, "after")?;
     let refreshed = saved.overlay().edit(|update| {
-        update.forget(File::TEXT, path.clone());
+        update.forget(File::TEXT, id);
         Ok(())
     })?;
-    assert_eq!(&*refreshed.get(File::TEXT, &path)?, "after");
-    assert_eq!(&*saved.get(File::TEXT, &path)?, "before");
+    assert_eq!(&*refreshed.get(File::TEXT, &id, &interner)?, "after");
+    assert_eq!(&*saved.get(File::TEXT, &id, &database)?, "before");
     Ok(())
 }
 
@@ -161,7 +172,7 @@ fn forgetting_an_observation_recaptures_it_without_changing_the_saved_snapshot()
 struct SessionText(String);
 
 impl SessionText {
-    fn load(key: &u32) -> ajika::Result<Arc<Self>> {
+    fn load(key: &u32, _cx: &dyn InputInit) -> ajika::Result<Arc<Self>> {
         Ok(Arc::new(Self(key.to_string())))
     }
 
@@ -198,13 +209,17 @@ fn session_length(db: &Db, key: u32) -> ajika::Result<usize> {
 fn arc_inputs_share_non_cloneable_payloads_and_apply_borrowed_policies() -> Result<()> {
     let directory = tempfile::tempdir()?;
     let inputs = Inputs::default();
-    let acquired = inputs.get(SessionFile::TEXT, &0)?;
+    let interner = Interner::default();
+    let acquired = inputs.get(SessionFile::TEXT, &0, &interner)?;
     let shared = Arc::new(SessionText("shared".into()));
     let inputs = inputs.edit(|update| {
         SessionFile::at(1).set_text(update, SessionText("owned".into()))?;
         SessionFile::at(2).set_text(update, shared.clone())
     })?;
-    assert!(Arc::ptr_eq(&shared, &inputs.get(SessionFile::TEXT, &2)?));
+    assert!(Arc::ptr_eq(
+        &shared,
+        &inputs.get(SessionFile::TEXT, &2, &interner)?
+    ));
 
     let mut database = Database::open(directory.path(), "inputs", inputs, (), retention())?;
     database.run(|db| {

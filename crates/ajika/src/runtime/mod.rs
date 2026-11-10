@@ -19,7 +19,7 @@ use std::{
     time::{Duration, Instant},
 };
 
-use crate::{Error, Result, Retention, Statistics};
+use crate::{Error, InputInit, Interner, Result, Retention, Statistics};
 
 mod backend;
 mod cache;
@@ -421,6 +421,12 @@ impl<S: Services> Database<S> {
     }
 }
 
+impl<S: Services> InputInit for Database<S> {
+    fn interner(&self) -> Interner {
+        Database::interner(self)
+    }
+}
+
 /// The working scope shared by every query in one [`Database::run`] callback.
 ///
 /// A host operation may ask many queries, possibly in parallel. Their loaded and computed values
@@ -546,6 +552,16 @@ impl<S: Services> Db<'_, S> {
         let result = self.handle(work);
         claim.complete();
         result
+    }
+}
+
+impl<S: Services> InputInit for Db<'_, S> {
+    fn interner(&self) -> Interner {
+        Db::interner(self)
+    }
+
+    fn check_cancelled(&self) -> Result<()> {
+        Db::check_cancelled(self)
     }
 }
 

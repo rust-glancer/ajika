@@ -20,7 +20,30 @@ use std::{
 };
 
 use self::table::{ErasedTable, Table, Value};
-use crate::{Durability, Error, Lifetime, Persist, Result, Stamp, UnavailableData, error::ensure};
+use crate::{
+    Durability, Error, Interner, Lifetime, Persist, Result, Stamp, UnavailableData, error::ensure,
+};
+
+/// Facilities available while capturing an input. An initializer can resolve or intern immutable
+/// IDs and check whether acquisition should stop. The captured value has no query dependencies
+/// of its own.
+pub trait InputInit {
+    /// Get a shared handle to the interner that owns the IDs in this input snapshot.
+    fn interner(&self) -> Interner;
+
+    /// Poll between chunks of acquisition and propagate the error to abandon the capture.
+    /// Query reads and validation use the active operation's check. Host-side reads through
+    /// a [`Database`](crate::Database) or [`Interner`] use the default check, which always succeeds.
+    fn check_cancelled(&self) -> Result<()> {
+        Ok(())
+    }
+}
+
+impl InputInit for Interner {
+    fn interner(&self) -> Interner {
+        self.clone()
+    }
+}
 
 /// One field of a keyed input declaration. Prefer [`#[ajika::input]`](macro@crate::input), which
 /// generates this contract and typed getters/setters for each field of an ordinary struct.
@@ -38,7 +61,7 @@ pub trait Input: 'static {
     /// Acquire an unseen key. Initializers perform external acquisition, not query computation.
     /// Concurrent acquisitions may race; all readers receive the first value installed in the
     /// snapshot. No runtime lock is held while this function performs I/O.
-    fn initialize(_key: &Self::Key) -> Result<Self::Value> {
+    fn initialize(_key: &Self::Key, _cx: &dyn InputInit) -> Result<Self::Value> {
         Err(UnavailableData::Input { name: Self::NAME }.into())
     }
 
@@ -92,6 +115,11 @@ pub(crate) struct Record {
 /// [`overlay`](Self::overlay) starts a sparse view over a saved snapshot. An editor can override
 /// changed files and share the other captured values. Use the saved snapshot as the base for
 /// successive editor views so lookup does not have to traverse every previous view.
+///
+/// The same `Inputs` object should NOT typically be passed to the several databases. `Inputs`
+/// are given access to the interner when initializing lazy values, and interner is
+/// database-specific. It is user responsibility to make sure that shared inputs do not
+/// rely on interner use.
 #[derive(Clone, Default)]
 pub struct Inputs {
     tables: Arc<RwLock<HashMap<TypeId, Arc<dyn ErasedTable>>>>,
@@ -138,9 +166,10 @@ impl Inputs {
 
     /// Host-side acquisition. Query code uses generated getters (or [`Db::input`](crate::Db::input))
     /// instead so Ajika records a dependency. This method is also useful during file discovery
-    /// before the host installs the snapshot in a database.
-    pub fn get<T: Input>(&self, _: Field<T>, key: &T::Key) -> Result<T::Value> {
-        Ok(self.read::<T>(key)?.value)
+    /// before the host installs the snapshot in a database. Pass the database or its interner as
+    /// the acquisition context so any interned IDs resolve to the same identities in both places.
+    pub fn get<T: Input>(&self, _: Field<T>, key: &T::Key, cx: &dyn InputInit) -> Result<T::Value> {
+        Ok(self.read::<T>(key, cx)?.value)
     }
 
     /// Inspect a captured value without triggering its initializer.
@@ -212,7 +241,7 @@ impl Inputs {
         Ok(())
     }
 
-    pub(crate) fn read<T: Input>(&self, key: &T::Key) -> Result<Value<T>> {
+    pub(crate) fn read<T: Input>(&self, key: &T::Key, cx: &dyn InputInit) -> Result<Value<T>> {
         if let Some(Some(value)) = self.lookup::<T, T::Key, _>(key, Clone::clone) {
             return Ok(value);
         }
@@ -222,11 +251,11 @@ impl Inputs {
         if self.table::<T>().is_none()
             && let Some(base) = &self.base
         {
-            return base.read::<T>(key);
+            return base.read::<T>(key, cx);
         }
         // Capture outside locks. A racing reader may have installed an observation in the
         // meantime, in which case use that same observation instead of our own capture.
-        let value = Value::<T>::new(T::initialize(key)?)?;
+        let value = Value::<T>::new(T::initialize(key, cx)?)?;
         let table = self.ensure_table::<T>();
         let mut values = table.values.write().expect("input values");
         Ok(values
@@ -237,13 +266,13 @@ impl Inputs {
     }
 
     /// Validation only needs evidence, not another clone of a potentially large input value.
-    pub(crate) fn record<T: Input>(&self, key: &T::Key) -> Result<Record> {
+    pub(crate) fn record<T: Input>(&self, key: &T::Key, cx: &dyn InputInit) -> Result<Record> {
         match self
             .lookup::<T, T::Key, _>(key, |value| value.record)
             .flatten()
         {
             Some(record) => Ok(record),
-            None => Ok(self.read::<T>(key)?.record),
+            None => Ok(self.read::<T>(key, cx)?.record),
         }
     }
 
