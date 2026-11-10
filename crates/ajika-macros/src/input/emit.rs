@@ -72,7 +72,7 @@ impl Field {
             pub const #selector: #runtime::Field<#marker> = #runtime::Field::new();
 
             #(#documentation)*
-            pub fn #name<#services: ::core::marker::Send + ::core::marker::Sync + 'static>(
+            pub fn #name<#services: #runtime::Services>(
                 &self, db: &#runtime::Db<'_, #services>
             ) -> #runtime::Result<#value> {
                 db.input::<#marker>(self.key.clone())

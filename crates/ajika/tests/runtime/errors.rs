@@ -1,5 +1,7 @@
 //! Error handling is observable through categories and typed payloads, independent of wrappers.
 
+use std::sync::atomic::{AtomicBool, Ordering};
+
 use ajika::{Error, ErrorKind, Result, ResultExt as _};
 
 use super::{Db, inputs, retention};
@@ -88,6 +90,46 @@ fn cancellation_keeps_its_checkpoint_and_the_next_operation_can_run() -> anyhow:
     };
     assert_eq!(cancelled.checkpoint(), "scan item");
     assert_eq!(*database.run(|db| super::leaf(db, 42))?, 42);
+    Ok(())
+}
+
+#[derive(Default)]
+struct HostCancellation(AtomicBool);
+
+impl ajika::Services for HostCancellation {
+    fn is_cancelled(&self) -> bool {
+        self.0.load(Ordering::Relaxed)
+    }
+}
+
+#[ajika::query]
+fn answer(_db: &ajika::Db<'_, HostCancellation>) -> Result<u32> {
+    Ok(42)
+}
+
+#[test]
+fn host_cancellation_stops_runs_and_query_calls() -> Result<()> {
+    let mut database =
+        ajika::Database::memory(inputs(""), HostCancellation::default(), retention());
+    assert_eq!(*database.run(answer)?, 42);
+
+    database
+        .run(|db| {
+            db.services().0.store(true, Ordering::Relaxed);
+            assert!(
+                answer(db)
+                    .expect_err("query observes host cancellation")
+                    .is_cancelled()
+            );
+            Ok(())
+        })
+        .expect_err("operation remembers host cancellation");
+
+    let result: Result<()> = database.run(|_| panic!("cancelled run must skip the callback"));
+    assert!(result.expect_err("host is still cancelled").is_cancelled());
+
+    database.set_services(HostCancellation::default());
+    assert_eq!(*database.run(answer)?, 42);
     Ok(())
 }
 

@@ -45,6 +45,21 @@ pub use self::{
     output::{Output, OutputSlot},
 };
 
+/// Host facilities available to queries without recording a dependency.
+/// Services may report progress or cancel a run. Data that determines query answers belongs
+/// in tracked inputs.
+pub trait Services: Send + Sync + 'static {
+    /// Report whether the host wants the current run to stop.
+    /// Ajika polls this at cancellation checkpoints, possibly from several workers at once.
+    /// Keep the check cheap and nonblocking. A host that changes its signal between requests
+    /// can install new services before starting the next run.
+    fn is_cancelled(&self) -> bool {
+        false
+    }
+}
+
+impl Services for () {}
+
 /// The application's long-lived query database.
 ///
 /// It owns the captured inputs and remembers previous query calls so later work can reuse them. The
@@ -58,7 +73,7 @@ pub use self::{
 /// working values as needed, but does not itself make previously checked answers uncertain.
 /// Only changed inputs or input policies advance the revision. Operations and replacements are exclusive
 /// on this owner; parallel query work happens inside an operation.
-pub struct Database<S: Send + Sync + 'static = ()> {
+pub struct Database<S: Services = ()> {
     inputs: crate::Inputs,
     services: S,
     backend: Backend,
@@ -76,7 +91,7 @@ pub struct Database<S: Send + Sync + 'static = ()> {
     statistics: Statistics,
 }
 
-impl<S: Send + Sync + 'static> Database<S> {
+impl<S: Services> Database<S> {
     /// Keep reusable results as typed Rust values without opening a storage file.
     /// Answers of persistent-policy queries can survive between operations in this database instance;
     /// transient query values and request-only results are still released at operation end.
@@ -255,12 +270,7 @@ impl<S: Send + Sync + 'static> Database<S> {
         let outcome = panic::catch_unwind(panic::AssertUnwindSafe(|| {
             // Repair while this run still owns the cache exclusively. Check cancellation
             // first so an obsolete request leaves repair for the next one.
-            if let Err(error) = self
-                .cancellation
-                .inner
-                .check()
-                .and_then(|()| self.backend.recover())
-            {
+            if let Err(error) = self.check_cancelled().and_then(|()| self.backend.recover()) {
                 return (Err(error), Statistics::default());
             }
             let operation = Operation::new(self);
@@ -358,6 +368,18 @@ impl<S: Send + Sync + 'static> Database<S> {
         }
     }
 
+    fn check_cancelled(&self) -> Result<()> {
+        let coordination = &self.cancellation.inner;
+        coordination.check()?;
+        if self.services.is_cancelled() {
+            // A worker may be asleep waiting for a query and unable to poll the host.
+            // Forward the signal to the coordinator so those workers stop too.
+            self.cancellation.cancel();
+            return coordination.check();
+        }
+        Ok(())
+    }
+
     /// Apply retention limits to stored and session results. A later request can recompute an
     /// evicted query and its outputs, including when needed by a retained query. Returns the
     /// number of query records removed.
@@ -408,7 +430,7 @@ impl<S: Send + Sync + 'static> Database<S> {
 ///
 /// It borrows the database's captured inputs for the whole run. This scope bounds working memory;
 /// it does not advance the input revision or make previous answers invalid.
-struct Operation<'db, S: Send + Sync + 'static> {
+struct Operation<'db, S: Services> {
     // Global to this process, so events from different databases cannot share an operation ID.
     id: u64,
     database: &'db Database<S>,
@@ -419,7 +441,7 @@ struct Operation<'db, S: Send + Sync + 'static> {
     now: u64,
 }
 
-impl<'db, S: Send + Sync + 'static> Operation<'db, S> {
+impl<'db, S: Services> Operation<'db, S> {
     fn new(database: &'db Database<S>) -> Self {
         static NEXT_OPERATION: AtomicU64 = AtomicU64::new(1);
         Self {
@@ -454,7 +476,7 @@ impl<'db, S: Send + Sync + 'static> Operation<'db, S> {
     }
 }
 
-impl<S: Send + Sync + 'static> Drop for Operation<'_, S> {
+impl<S: Services> Drop for Operation<'_, S> {
     fn drop(&mut self) {
         self.database.cancellation.inner.assert_drained();
     }
@@ -464,12 +486,12 @@ impl<S: Send + Sync + 'static> Drop for Operation<'_, S> {
 ///
 /// The host callback and its queries use the same captured inputs for the run. Ajika loads or
 /// computes answers as needed, and reads made inside a query automatically become its dependencies.
-pub struct Db<'operation, S: Send + Sync + 'static = ()> {
+pub struct Db<'operation, S: Services = ()> {
     operation: &'operation Operation<'operation, S>,
     frame: &'operation Frame,
 }
 
-impl<S: Send + Sync + 'static> Db<'_, S> {
+impl<S: Services> Db<'_, S> {
     /// Access the shared interner without recording a query dependency.
     pub fn interner(&self) -> crate::Interner {
         self.operation.database.interner()
@@ -489,7 +511,7 @@ impl<S: Send + Sync + 'static> Db<'_, S> {
     /// arbitrary application code on its own.
     pub fn check_cancelled(&self) -> Result<()> {
         self.operation.database.backend.check()?;
-        self.operation.database.cancellation.inner.check()
+        self.operation.database.check_cancelled()
     }
 
     /// Share the reason work stopped before returning it to the caller. When a provider catches
@@ -527,7 +549,7 @@ impl<S: Send + Sync + 'static> Db<'_, S> {
     }
 }
 
-impl<S: Send + Sync + 'static> fmt::Debug for Db<'_, S> {
+impl<S: Services> fmt::Debug for Db<'_, S> {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         f.debug_struct("Db")
             .field("revision", &self.operation.database.revision)

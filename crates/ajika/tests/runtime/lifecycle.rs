@@ -17,7 +17,11 @@ struct Control {
     entered: Barrier,
 }
 
-type Db<'a> = ajika::Db<'a, Arc<Control>>;
+struct TestServices(Arc<Control>);
+
+impl ajika::Services for TestServices {}
+
+type Db<'a> = ajika::Db<'a, TestServices>;
 
 #[ajika::input(key = (), lifetime = Operation)]
 struct OperationControl {
@@ -35,7 +39,7 @@ fn control_inputs(control: &Control) -> Inputs {
 #[ajika::query]
 fn wait_for_cancellation(db: &Db) -> ajika::Result<u32> {
     if OperationControl::at(()).enabled(db)? {
-        db.services().entered.wait();
+        db.services().0.entered.wait();
         loop {
             db.check_cancelled()?;
             thread::yield_now();
@@ -55,7 +59,7 @@ fn cancelling_parallel_demands_drains_them_and_the_next_operation_can_retry() ->
         directory.path().join("queries"),
         "test",
         control_inputs(&control),
-        control.clone(),
+        TestServices(control.clone()),
         retention(),
     )?;
     db.set_parallelism(2);
@@ -100,7 +104,11 @@ fn an_unwinding_provider_leaves_no_claim_or_uncommitted_value() -> Result<()> {
         enabled: AtomicBool::new(true),
         entered: Barrier::new(1),
     });
-    let mut db = Database::memory(control_inputs(&control), control.clone(), retention());
+    let mut db = Database::memory(
+        control_inputs(&control),
+        TestServices(control.clone()),
+        retention(),
+    );
     let panic = panic::catch_unwind(panic::AssertUnwindSafe(|| db.run(may_panic)));
     assert!(panic.is_err());
     control.enabled.store(false, Ordering::Release);
@@ -113,7 +121,7 @@ fn an_unwinding_provider_leaves_no_claim_or_uncommitted_value() -> Result<()> {
 #[ajika::query(forward)]
 fn mutually_recursive(db: &Db, key: u32) -> ajika::Result<Arc<u32>> {
     if OperationControl::at(()).enabled(db)? {
-        db.services().entered.wait();
+        db.services().0.entered.wait();
         return recursive_peer(db, 1 - key).context("building declarations");
     }
     Ok(Arc::new(key))
@@ -137,7 +145,11 @@ fn a_cross_worker_cycle_finishes_and_does_not_poison_the_next_operation() -> Res
         enabled: AtomicBool::new(true),
         entered: Barrier::new(2),
     });
-    let mut db = Database::memory(control_inputs(&control), control.clone(), retention());
+    let mut db = Database::memory(
+        control_inputs(&control),
+        TestServices(control.clone()),
+        retention(),
+    );
     db.set_parallelism(2);
     let result: ajika::Result<()> = db.run(|db| {
         let error = db

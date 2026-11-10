@@ -9,14 +9,16 @@
 use std::{any::TypeId, collections::HashMap, sync::Arc};
 
 use super::{Db, cache::Memo, record::Address};
-use crate::{__private::Registration, Query, Result, codec, input::Record as InputRecord};
+use crate::{
+    __private::Registration, Query, Result, Services, codec, input::Record as InputRecord,
+};
 
 /// A query call with its key still encoded. The bool requests the primary value as well as
 /// a valid output version; false allows dependency validation to leave the payload unloaded.
 type Replay<S> = fn(&Db<'_, S>, &[u8], bool) -> Result<Arc<Memo>>;
 
 /// A saved name's query implementation, with a type identity for detecting name collisions.
-struct QueryEntry<S: Send + Sync + 'static> {
+struct QueryEntry<S: Services> {
     identity: TypeId,
     replay: Replay<S>,
 }
@@ -27,12 +29,12 @@ struct QueryEntry<S: Send + Sync + 'static> {
 /// query's key type, then enter the normal evaluator. The stored name is stable across restarts.
 /// [`TypeId`] values only check that two different Rust implementations did not claim that name in
 /// this process; they are not part of persistent identity.
-pub(crate) struct Registry<S: Send + Sync + 'static> {
+pub(crate) struct Registry<S: Services> {
     queries: HashMap<&'static str, QueryEntry<S>>,
     inputs: crate::input::registry::Registry,
 }
 
-impl<S: Send + Sync + 'static> Registry<S> {
+impl<S: Services> Registry<S> {
     /// Gather declarations from the linked program once when constructing a database.
     /// Query calls can then look up names directly instead of scanning registrations each time.
     pub(crate) fn linked() -> Self {

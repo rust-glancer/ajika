@@ -10,7 +10,7 @@ use super::{
     Operation,
     record::{Address, Dependency, Slot},
 };
-use crate::codec;
+use crate::{Services, codec};
 
 pub(super) const TARGET: &str = "ajika::diagnostics";
 
@@ -95,7 +95,7 @@ impl SlotLabel {
     }
 }
 
-impl<S: Send + Sync + 'static> Operation<'_, S> {
+impl<S: Services> Operation<'_, S> {
     pub(super) fn diagnostic_execute(&self, address: &Address, reason: &'static str) {
         if tracing::enabled!(target: TARGET, tracing::Level::DEBUG) {
             let id = address.id();

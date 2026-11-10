@@ -65,7 +65,7 @@ impl Declaration {
                 /// Required values accept owned payloads or Arcs. An optional `None` emits no slot.
                 /// The query publishes all outputs together when its execution succeeds.
                 #[allow(clippy::too_many_arguments)]
-                pub fn new<#services: ::core::marker::Send + ::core::marker::Sync + 'static>(
+                pub fn new<#services: #runtime::Services>(
                     #context: &#runtime::Db<'_, #services>,
                     #(#parameters),*
                 ) -> #runtime::Result<Self> {

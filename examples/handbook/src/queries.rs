@@ -173,6 +173,8 @@ impl Page {
 #[derive(Default)]
 pub(crate) struct Activity(Mutex<Vec<Execution>>);
 
+impl ajika::Services for Activity {}
+
 impl Activity {
     fn record(&self, query: &'static str, page: &str) {
         self.0.lock().expect("activity log").push(Execution {
