@@ -16,10 +16,11 @@ use super::{
     value::{Codec, Value},
 };
 use crate::{
-    Durability, Error, Input, Lifetime, Persist, Query, Result, UnavailableData, error::ensure,
+    Durability, Error, Input, Lifetime, Persist, Query, Result, Services, UnavailableData,
+    error::ensure,
 };
 
-impl<'db, S: Send + Sync + 'static> Db<'db, S> {
+impl<'db, S: Services> Db<'db, S> {
     /// Ask query Q for the answer to `key` under this operation's captured inputs.
     /// Repeated calls can share a loaded answer; later calls may load a saved answer or compute
     /// a new one. The caller always receives an ordinary [`Arc`] and need not choose the path.

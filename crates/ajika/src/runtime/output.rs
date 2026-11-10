@@ -16,7 +16,7 @@ use std::{
 use wincode::{SchemaRead, SchemaWrite};
 
 use super::{Db, record::Address};
-use crate::{Persist, Result, codec};
+use crate::{Persist, Result, Services, codec};
 
 /// Names one additional value within the query that emits it. A fixed name such as `"declarations"`
 /// identifies a single output; `("body", id)` identifies one of many outputs of the same kind.
@@ -86,14 +86,14 @@ impl<T: Persist + PartialEq + Send + Sync + 'static> Output<T> {
     /// Inside a query, the read records this output's version so the caller can be reused while
     /// this particular answer stays equal. It does not depend on sibling outputs. If the producer
     /// no longer emits this slot, the handle cannot supply a value and the read returns an error.
-    pub fn value<S: Send + Sync + 'static>(&self, db: &Db<'_, S>) -> Result<Arc<T>> {
+    pub fn value<S: Services>(&self, db: &Db<'_, S>) -> Result<Arc<T>> {
         db.output_value(&self.identity.producer, &self.identity.slot)
     }
 
     /// Read this output with the same dependency tracking as [`value`](Self::value).
     /// The reference lasts for the lifetime of the supplied [`Db`], even if the handle
     /// is dropped first. Use `value` to keep the answer after the operation ends.
-    pub fn value_ref<'db, S: Send + Sync + 'static>(&self, db: &Db<'db, S>) -> Result<&'db T> {
+    pub fn value_ref<'db, S: Services>(&self, db: &Db<'db, S>) -> Result<&'db T> {
         let value = db.output_value(&self.identity.producer, &self.identity.slot)?;
         // SAFETY: output_value returns the Arc kept in db's frame. The frame never
         // removes or replaces acquired outputs and is borrowed for 'db.

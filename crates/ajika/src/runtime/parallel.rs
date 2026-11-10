@@ -14,7 +14,7 @@ use std::{
 };
 
 use super::{Db, coordination::Coordination, frame::Frame};
-use crate::{Error, Result};
+use crate::{Error, Result, Services};
 
 /// One extra thread taken from the operation's shared worker budget. Returning it on drop lets
 /// later nested batches use that capacity, including when the worker exits by unwinding.
@@ -41,7 +41,7 @@ impl Drop for Worker<'_> {
     }
 }
 
-impl<S: Send + Sync + 'static> Db<'_, S> {
+impl<S: Services> Db<'_, S> {
     /// Apply a callback to independent items concurrently, such as calling `words` for each file.
     /// Each callback receives a [`Db`] for the same operation, so nested queries share answers as
     /// usual. Return values stay in input order even when callbacks finish in a different order.

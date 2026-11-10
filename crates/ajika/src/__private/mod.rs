@@ -12,7 +12,7 @@ pub use inventory;
 pub use wincode;
 
 pub use crate::interner::Interned;
-use crate::{Db, Input, Query, Result, runtime::registry::Registry};
+use crate::{Db, Input, Query, Result, Services, runtime::registry::Registry};
 
 /// A linked declaration's instruction for adding itself to a database's replay registry.
 ///
@@ -44,10 +44,10 @@ pub fn install_input<T: Input>(registry: &mut dyn Any) {
 /// `<fn(&AppDb) as DbType>::Services` and let Rust resolve it to Services. Parsing the alias's
 /// spelling in the macro would not be enough to discover that type.
 pub trait DbType {
-    type Services: Send + Sync + 'static;
+    type Services: crate::Services;
 }
 
-impl<S: Send + Sync + 'static> DbType for fn(&Db<'_, S>) {
+impl<S: Services> DbType for fn(&Db<'_, S>) {
     type Services = S;
 }
 

@@ -168,7 +168,7 @@ pub struct Retention {
 /// filesystem read would be invisible when Ajika decides to reuse an old answer.
 pub trait Query: 'static {
     /// Untracked host facilities, such as progress reporting. Semantic values live in [`Inputs`](crate::Inputs).
-    type Services: Send + Sync + 'static;
+    type Services: crate::Services;
 
     /// Arguments identifying the same logical question across edits, such as a file path.
     /// Avoid including the whole input revision: that creates a different call after every
