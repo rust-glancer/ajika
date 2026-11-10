@@ -44,9 +44,11 @@ jobs:
         with:
           tool: cargo-codspeed@4.7.0
       - name: Build benchmarks
-        run: cargo codspeed build -p ${{ matrix.package }} --bench ${{ matrix.bench }} --locked
+        run: cargo codspeed build --measurement-mode simulation,memory -p ${{ matrix.package }} --bench ${{ matrix.bench }} --locked
       - name: Run benchmarks
-        uses: CodSpeedHQ/action@9d332c4d90b43981c3e55ae8e38e68709996240f # v4
+        uses: CodSpeedHQ/action@af75f77f17a054769abefaa42fe8dc2975469b5f # v5.6.3
         with:
-          mode: simulation
+          mode: simulation,memory
+          # Track allocation counts separately so runner-specific allocator costs stay out of CPU scores.
+          exclude-allocations: true
           run: cargo codspeed run -p ${{ matrix.package }} --bench ${{ matrix.bench }}
