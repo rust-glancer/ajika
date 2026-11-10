@@ -67,10 +67,10 @@ fn refresh_later(database: &mut Database, path: String) -> Result<()> {
 }
 ```
 
-The next read can initialize that field again. `forget_all` applies the same
-idea to a whole field family. Neither means that the external entity no longer
-exists. If absence is a meaningful result, capture it explicitly—for example,
-as an `Option` value—so queries can depend on absence too.
+The next read can initialize that field again. Use `File::at(path).forget_all(update)`
+to forget every field for one path, or `update.forget_all(File::TEXT)` to forget
+the text for every path. If absence is a meaningful result, capture it explicitly,
+for example as an `Option` value, so queries can depend on absence too.
 
 Prefer one batch for a group of file changes. It defines the next input view and
 avoids copying a field table separately for every file.

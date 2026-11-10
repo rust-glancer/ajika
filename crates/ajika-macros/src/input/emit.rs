@@ -20,6 +20,14 @@ impl Declaration {
             |name| quote!(#name),
         );
         let methods = self.fields.iter().map(|field| field.methods(runtime));
+        let forget_fields = self.fields.iter().map(|field| {
+            let gates = &field.attributes.gates;
+            let selector = &field.selector;
+            quote! {
+                #(#gates)*
+                update.forget(Self::#selector, self.key.clone());
+            }
+        });
         let implementations = self
             .fields
             .iter()
@@ -32,6 +40,13 @@ impl Declaration {
             impl #name {
                 /// Address an input by its stable application key; this does not acquire its value.
                 pub fn at(key: #key) -> Self { Self { key } }
+
+                /// Forget every field for this key. The next read can initialize a field again.
+                /// Fields without an initializer must be set again.
+                pub fn forget_all(&self, #[allow(unused_variables)] update: &mut #runtime::InputUpdate) {
+                    #(#forget_fields)*
+                }
+
                 #(#methods)*
             }
 
