@@ -139,6 +139,14 @@ impl Inputs {
     /// Prepare changes without exposing a partial batch. An error (or unwinding) drops the private
     /// changes. The original snapshot remains usable, including its previously captured lazy keys.
     pub fn edit(&self, edit: impl FnOnce(&mut InputUpdate) -> Result<()>) -> Result<Self> {
+        let (inputs, ()) = self.edit_with_result(edit)?;
+        Ok(inputs)
+    }
+
+    pub(crate) fn edit_with_result<R>(
+        &self,
+        edit: impl FnOnce(&mut InputUpdate) -> Result<R>,
+    ) -> Result<(Self, R)> {
         let mut update = InputUpdate {
             inputs: Self {
                 tables: Arc::new(RwLock::new(
@@ -148,8 +156,8 @@ impl Inputs {
             },
             changed: HashSet::new(),
         };
-        edit(&mut update)?;
-        Ok(update.inputs)
+        let value = edit(&mut update)?;
+        Ok((update.inputs, value))
     }
 
     /// Create a sparse view over these inputs, initially with no local overrides.

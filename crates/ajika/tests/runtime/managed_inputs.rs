@@ -60,6 +60,14 @@ fn field_updates_are_private_until_published_and_saved_inputs_can_be_restored() 
         0,
         "equal assignments preserve validity"
     );
+
+    let published = database.update_inputs(|update| {
+        let text = String::from("published");
+        package.set_text(update, text.clone())?;
+        Ok(text)
+    })?;
+    assert_eq!(published, "published");
+    assert_eq!(*database.run(text)?, published);
     Ok(())
 }
 
