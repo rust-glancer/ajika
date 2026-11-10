@@ -76,6 +76,8 @@ pub fn register(args: TokenStream, input: TokenStream) -> TokenStream {
 /// Fields describe inputs rather than Rust struct storage. All generated getters, setters and
 /// field selectors are public on the handle; the declaration's visibility controls access to
 /// that handle. Field visibility does not restrict the generated API, so fields need no `pub`.
+/// Call `handle.forget_all(update)` to forget every field for the handle's key.
+/// The generated handle reserves `at` and `forget_all` as method names.
 #[proc_macro_attribute]
 pub fn input(args: TokenStream, input: TokenStream) -> TokenStream {
     input::expand(args.into(), input.into())

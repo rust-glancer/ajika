@@ -71,6 +71,25 @@ fn field_updates_are_private_until_published_and_saved_inputs_can_be_restored() 
     Ok(())
 }
 
+#[test]
+fn forgetting_an_input_clears_all_fields_for_its_key() -> Result<()> {
+    let first = Package::at(1);
+    let second = Package::at(2);
+    let saved = Inputs::default().edit(|update| {
+        first.set_text(update, "first".into())?;
+        first.set_edition(update, 2024)?;
+        second.set_text(update, "second".into())?;
+        second.set_edition(update, 2021)
+    })?;
+    let edited = saved.overlay().edit(|update| {
+        first.forget_all(update);
+        Ok(())
+    })?;
+    assert_eq!(edited.entries(Package::TEXT), [(2, "second".to_owned())]);
+    assert_eq!(edited.entries(Package::EDITION), [(2, 2021)]);
+    Ok(())
+}
+
 #[ajika::interned]
 struct FileId {
     path: String,
