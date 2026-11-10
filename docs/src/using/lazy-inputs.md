@@ -23,14 +23,16 @@ struct File {
 }
 ```
 
-If `File::at(path).text(db)` has no captured value, Ajika invokes `acquire_text`
-and records the returned text and its stamp. It does not read the file afresh on
-every query call. A setter can install the field before the initializer is needed.
-For an `arc` field, an initializer can also return an existing `Arc<T>`.
+Treat lazy acquisition as an optimization. A read or cache validation can run
+`acquire_text` whenever it needs an uncaptured key. A successful capture becomes
+visible to the application, including through views that share that input.
 
-The initializer runs outside the input table's lock. Two workers racing on an
-uncaptured field can both acquire it; the first installed observation wins and
-both readers receive that observation. Acquisition must tolerate this duplication.
+A setter can install the field before the initializer is needed. For an `arc`
+field, an initializer can also return an existing `Arc<T>`.
+
+The initializer runs outside the input table's lock. If two successful
+initializations race for the same entry, both reads return the first value
+installed.
 
 An initializer has no query context or services argument. It acquires external
 data; it is not another query with dependencies.

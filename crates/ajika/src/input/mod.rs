@@ -136,15 +136,6 @@ impl Inputs {
         }
     }
 
-    /// Keep this view's local fields while replacing its inherited inputs. A host can retain
-    /// Cargo configuration and switch between saved sources and a sparse editor view.
-    pub fn with_base(&self, base: &Self) -> Self {
-        Self {
-            tables: self.tables.clone(),
-            base: Some(Arc::new(base.clone())),
-        }
-    }
-
     /// Host-side acquisition. Query code uses generated getters (or [`Db::input`](crate::Db::input))
     /// instead so Ajika records a dependency. This method is also useful during file discovery
     /// before the host installs the snapshot in a database.
