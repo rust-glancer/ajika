@@ -1,5 +1,14 @@
 # Changelog
 
+## [0.1.5](https://github.com/rust-glancer/ajika/compare/v0.1.4...v0.1.5) (2026-11-10)
+
+
+### Features
+
+* Forget all ([#19](https://github.com/rust-glancer/ajika/issues/19)) ([d1f40c5](https://github.com/rust-glancer/ajika/commit/d1f40c54faa25e2bd8315e994f5af813f1bde518))
+* Input context for lazy initializers ([#16](https://github.com/rust-glancer/ajika/issues/16)) ([d97880e](https://github.com/rust-glancer/ajika/commit/d97880e04d9b48ad61ccd5a5d74d774d17a706b6))
+* Make updating inputs return value ([#18](https://github.com/rust-glancer/ajika/issues/18)) ([2a7a6c9](https://github.com/rust-glancer/ajika/commit/2a7a6c9454ab9b3d70bb216926aacc5f2cc2bc45))
+
 ## [0.1.4](https://github.com/rust-glancer/ajika/compare/v0.1.3...v0.1.4) (2026-11-10)
 
 
