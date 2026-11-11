@@ -21,7 +21,7 @@ use ajika_storage::{Database as StorageDatabase, Options};
 
 use super::{
     cache::Memo,
-    record::{Address, Id, Record, RecordHeader, Slot},
+    record::{Address, QueryId, Record, RecordHeader, Slot},
     value::{Codec, Value},
 };
 use crate::{Error, Lifetime, Result, Retention, Statistics, codec};
@@ -50,7 +50,7 @@ struct Usage {
 }
 
 enum Store {
-    Memory(Mutex<HashMap<Id, Stored>>),
+    Memory(Mutex<HashMap<QueryId, Stored>>),
     Disk(StorageDatabase),
 }
 
@@ -69,7 +69,7 @@ pub(crate) struct Backend {
     session: Mutex<SessionStore>,
     store: Store,
     // Small retention inventory. Loading this does not populate the runtime's query memos.
-    usage: Mutex<HashMap<Id, Usage>>,
+    usage: Mutex<HashMap<QueryId, Usage>>,
     // Keep the first fault that needs repair until the next run has exclusive access.
     recovery: OnceLock<Error>,
     bytes: AtomicU64,
@@ -141,8 +141,8 @@ impl Backend {
     fn reuse_or_rebuild_usage(
         database: &mut StorageDatabase,
         interner: &crate::Interner,
-        loaded: Result<HashMap<Id, Usage>>,
-    ) -> Result<HashMap<Id, Usage>> {
+        loaded: Result<HashMap<QueryId, Usage>>,
+    ) -> Result<HashMap<QueryId, Usage>> {
         match loaded {
             Err(error) if error.is_invalid_cache() => {
                 Self::rebuild_corrupt_cache(database, Some(interner), &error)
@@ -155,7 +155,7 @@ impl Backend {
         database: &mut StorageDatabase,
         interner: Option<&crate::Interner>,
         error: &Error,
-    ) -> Result<HashMap<Id, Usage>> {
+    ) -> Result<HashMap<QueryId, Usage>> {
         match interner {
             Some(interner) => interner.rebuild(database)?,
             None => database.rebuild(&[])?,
@@ -170,7 +170,7 @@ impl Backend {
         Ok(HashMap::new())
     }
 
-    fn load_usage(database: &StorageDatabase) -> Result<HashMap<Id, Usage>> {
+    fn load_usage(database: &StorageDatabase) -> Result<HashMap<QueryId, Usage>> {
         let mut usage = HashMap::new();
         // Restart needs sizes and last-use times to enforce retention. Decode each record
         // only long enough to extract those fields; dependency lists are not retained here,
@@ -178,7 +178,7 @@ impl Backend {
         for (id, bytes) in database.snapshot()?.records()? {
             let record: Record = codec::decode(&bytes)?;
             usage.insert(
-                id,
+                QueryId(id),
                 Usage {
                     used: record.last_used,
                     bytes: record.bytes,
@@ -218,7 +218,7 @@ impl Backend {
         Ok(())
     }
 
-    fn replace_usage(&mut self, usage: HashMap<Id, Usage>) {
+    fn replace_usage(&mut self, usage: HashMap<QueryId, Usage>) {
         // A session record can point to a payload stored in a durable pack. Recovery may
         // restore an older checkpoint with different packs and records, so clear the
         // session cache. Saved queries will be validated against the installed inputs.
@@ -276,7 +276,7 @@ impl Backend {
     /// Load only the output metadata into a known-valid call's working memo. Disk storage
     /// still reads the complete metadata row, but decoding stops before dependency addresses.
     /// This keeps one stored record without allocating a dependency graph just to load a value.
-    pub(crate) fn header(&self, id: &Id) -> Result<(Option<Arc<RecordHeader>>, bool)> {
+    pub(crate) fn header(&self, id: &QueryId) -> Result<(Option<Arc<RecordHeader>>, bool)> {
         self.check()?;
         if let Some(record) = self.session.lock().expect("session storage").record(id) {
             return Ok((Some(record.header.clone()), false));
@@ -294,7 +294,7 @@ impl Backend {
                 Ok((
                     database
                         .snapshot()?
-                        .metadata(id)?
+                        .metadata(&id.0)?
                         .map(|bytes| codec::decode_prefix(&bytes))
                         .transpose()?,
                     true,
@@ -307,7 +307,7 @@ impl Backend {
     /// No payload is loaded and no validity is assumed. The evaluator uses this record to
     /// check reuse or compare a new execution with the old one. A new or collected key is absent.
     /// The flag reports a disk read, including a miss, for the operation's I/O counters.
-    pub(crate) fn record(&self, id: &Id) -> Result<(Option<Arc<Record>>, bool)> {
+    pub(crate) fn record(&self, id: &QueryId) -> Result<(Option<Arc<Record>>, bool)> {
         self.check()?;
         if let Some(record) = self.session.lock().expect("session storage").record(id) {
             return Ok((Some(record), false));
@@ -315,7 +315,7 @@ impl Backend {
         Ok((self.durable_record(id)?, self.is_disk()))
     }
 
-    fn durable_record(&self, id: &Id) -> Result<Option<Arc<Record>>> {
+    fn durable_record(&self, id: &QueryId) -> Result<Option<Arc<Record>>> {
         match &self.store {
             Store::Memory(store) => Ok(store
                 .lock()
@@ -325,7 +325,7 @@ impl Backend {
             Store::Disk(database) => self.observe((|| {
                 database
                     .snapshot()?
-                    .metadata(id)?
+                    .metadata(&id.0)?
                     .map(|bytes| codec::decode(&bytes).map(Arc::new))
                     .transpose()
             })()),
@@ -378,7 +378,7 @@ impl Backend {
                 let bytes = self.observe(
                     database
                         .snapshot()
-                        .and_then(|read| read.read_value(&address.value_id(slot), length))
+                        .and_then(|read| read.read_value(&address.value_id(slot).0, length))
                         .map_err(Error::from),
                 )?;
                 check()?;
@@ -397,7 +397,7 @@ impl Backend {
 
     /// Recover the last validation revision without retaining a decoded query record.
     /// A session override hides the durable record's proof, even before it has been validated.
-    pub(crate) fn verified(&self, id: &Id) -> u64 {
+    pub(crate) fn verified(&self, id: &QueryId) -> u64 {
         if let Some(revision) = self.session.lock().expect("session storage").verified(id) {
             return revision;
         }
@@ -439,7 +439,7 @@ impl Backend {
 
     /// Refresh a saved result's retention age without writing to disk on every query read.
     /// If this key has never been saved, checkpointing will add its usage entry when it is retained.
-    pub(crate) fn touch(&self, id: &Id, now: u64) {
+    pub(crate) fn touch(&self, id: &QueryId, now: u64) {
         self.session.lock().expect("session storage").touch(id, now);
         if let Some(usage) = self.usage.lock().expect("storage usage").get_mut(id) {
             usage.used = now;
@@ -552,7 +552,7 @@ impl Backend {
                     if let Some(previous) = &original {
                         for (slot, value) in &previous.header.values {
                             if !record.header.values.contains_key(slot) && value.length.is_some() {
-                                write.remove_value(&record.address.value_id(slot))?;
+                                write.remove_value(&record.address.value_id(slot).0)?;
                             }
                         }
                     }
@@ -590,7 +590,7 @@ impl Backend {
                     let bytes = codec::encode(&record)?;
                     stats.metadata_writes += 1;
                     stats.metadata_bytes_written += bytes.len() as u64;
-                    write.set_metadata(&memo.id, &bytes)?;
+                    write.set_metadata(&memo.id.0, &bytes)?;
                 } else {
                     // A promoted session record carries an encoded-size estimate. Typed memory
                     // storage uses only entry and age limits, so leave that estimate behind.
@@ -744,7 +744,7 @@ impl Backend {
                         let read = database.snapshot()?;
                         ordered
                             .iter()
-                            .map(|(id, item)| Ok((*id, *item, read.metadata(id)?)))
+                            .map(|(id, item)| Ok((*id, *item, read.metadata(&id.0)?)))
                             .collect::<Result<Vec<_>>>()?
                     };
                     let mut write = database.begin_write()?;
@@ -756,13 +756,13 @@ impl Backend {
                         if removed.contains(id) {
                             for (slot, value) in &record.header.values {
                                 if value.length.is_some() {
-                                    write.remove_value(&record.address.value_id(slot))?;
+                                    write.remove_value(&record.address.value_id(slot).0)?;
                                 }
                             }
-                            write.remove_metadata(id)?;
+                            write.remove_metadata(&id.0)?;
                         } else if record.last_used != item.used {
                             record.last_used = item.used;
-                            write.set_metadata(id, &codec::encode(&record)?)?;
+                            write.set_metadata(&id.0, &codec::encode(&record)?)?;
                         }
                     }
                     write.commit()?;

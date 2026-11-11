@@ -101,7 +101,7 @@ impl<S: Services> Operation<'_, S> {
             let id = address.id();
             tracing::debug!(target: TARGET,
                 op = self.id, revision = self.database.revision,
-                query = address.family, call = %Hex(&id[..4]), call_id = %Hex(&id),
+                query = address.family, call = %Hex(&id.0[..4]), call_id = %Hex(&id.0),
                 reason, "execute");
         }
     }
@@ -112,8 +112,8 @@ impl<S: Services> Operation<'_, S> {
             let output = SlotLabel::new(slot);
             tracing::trace!(target: TARGET,
                 op = self.id, revision = self.database.revision,
-                query = address.family, call = %Hex(&id[..4]), call_id = %Hex(&id),
-                output = output.0, output_id = %Hex(&address.value_id(slot)),
+                query = address.family, call = %Hex(&id.0[..4]), call_id = %Hex(&id.0),
+                output = output.0, output_id = %Hex(&address.value_id(slot).0),
                 reason = reason.name(), "reuse");
         }
     }
@@ -134,10 +134,10 @@ impl<S: Services> Operation<'_, S> {
             let output = SlotLabel::new(slot);
             tracing::debug!(target: TARGET,
                 op = self.id, revision = self.database.revision,
-                query = parent.family, call = %Hex(&id[..4]), call_id = %Hex(&id),
-                dependency = address.family, dependency_call = %Hex(&child[..4]),
-                dependency_id = %Hex(&child), dependency_kind = kind,
-                output = output.0, output_id = %Hex(&address.value_id(slot)),
+                query = parent.family, call = %Hex(&id.0[..4]), call_id = %Hex(&id.0),
+                dependency = address.family, dependency_call = %Hex(&child.0[..4]),
+                dependency_id = %Hex(&child.0), dependency_kind = kind,
+                output = output.0, output_id = %Hex(&address.value_id(slot).0),
                 reason, "invalidated");
         }
     }
@@ -149,8 +149,8 @@ impl<S: Services> Operation<'_, S> {
             let (result, evidence, version) = outcome.fields();
             tracing::trace!(target: TARGET,
                 op = self.id, revision = self.database.revision,
-                query = address.family, call = %Hex(&id[..4]), call_id = %Hex(&id),
-                output = output.0, output_id = %Hex(&address.value_id(slot)),
+                query = address.family, call = %Hex(&id.0[..4]), call_id = %Hex(&id.0),
+                output = output.0, output_id = %Hex(&address.value_id(slot).0),
                 result, evidence, version, "output");
         }
     }

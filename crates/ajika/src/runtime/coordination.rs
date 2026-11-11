@@ -14,7 +14,7 @@ use std::{
     },
 };
 
-use super::{diagnostics::Hex, record::Id};
+use super::{diagnostics::Hex, record::QueryId};
 use crate::{Cancelled, Error, Result};
 
 /// A handle the host can use to request that one operation stop, usually from another thread.
@@ -98,18 +98,24 @@ impl std::error::Error for QueryCycle {}
 struct State {
     /// Borrow declaration names for active claims; ordinary validation and loading allocate no
     /// name copies. Only an actual cycle needs owned names for its error report.
-    running: HashMap<Id, &'static str>,
+    running: HashMap<QueryId, &'static str>,
     // These are active nested calls, not the saved dependency graph. Include calls doing work
     // as well as calls waiting for a claim: both can close a cycle. Parallel branches may make
     // the same parent -> child call, so one branch finishing must not remove another's edge.
-    calls: HashMap<(Id, Id), usize>,
+    calls: HashMap<(QueryId, QueryId), usize>,
     failure: Option<Error>,
 }
 
 impl State {
     /// Find an active path from child back to parent before adding parent -> child. Keep the
     /// successful route so a cycle error can identify the actual calls, not just the last one.
-    fn path(&self, from: Id, to: Id, seen: &mut HashSet<Id>, path: &mut Vec<Id>) -> bool {
+    fn path(
+        &self,
+        from: QueryId,
+        to: QueryId,
+        seen: &mut HashSet<QueryId>,
+        path: &mut Vec<QueryId>,
+    ) -> bool {
         // Only running queries own outgoing calls. A request for a free key cannot
         // close a cycle, so it needs neither a graph scan nor a visited-set allocation.
         if from == to {
@@ -191,8 +197,8 @@ impl Coordination {
     /// before doing work, because the previous owner may have completed it during the wait.
     pub(crate) fn claim(
         &self,
-        parent: Option<Id>,
-        key: Id,
+        parent: Option<QueryId>,
+        key: QueryId,
         name: &'static str,
     ) -> Result<Claim<'_>> {
         // Declare the guard before the lock so early returns release the lock first.
@@ -221,7 +227,7 @@ impl Coordination {
                                 .copied()
                                 .expect("cycle has active claims")
                                 .to_owned(),
-                            id,
+                            id: id.0,
                         })
                         .collect(),
                 };
@@ -270,9 +276,9 @@ impl Coordination {
 /// so another worker does not try to continue from an abandoned computation.
 pub(crate) struct Claim<'a> {
     coordination: &'a Coordination,
-    key: Id,
+    key: QueryId,
     // Registered before waiting; it needs removal even if this worker never acquires the key.
-    edge: Option<(Id, Id)>,
+    edge: Option<(QueryId, QueryId)>,
     acquired: bool,
     complete: bool,
     pub(crate) waited: bool,

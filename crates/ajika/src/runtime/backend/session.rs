@@ -13,35 +13,35 @@ use super::{Stored, Usage};
 use crate::{
     Result, Retention, codec,
     runtime::{
-        record::{Id, Record, RecordHeader, Slot},
+        record::{QueryId, Record, RecordHeader, Slot},
         value::Value,
     },
 };
 
 #[derive(Default)]
 pub(super) struct SessionStore {
-    entries: HashMap<Id, Stored>,
-    usage: HashMap<Id, Usage>,
+    entries: HashMap<QueryId, Stored>,
+    usage: HashMap<QueryId, Usage>,
     bytes: u64,
     last_collection: u64,
 }
 
 impl SessionStore {
-    pub(super) fn verified(&self, id: &Id) -> Option<u64> {
+    pub(super) fn verified(&self, id: &QueryId) -> Option<u64> {
         self.usage.get(id).map(|entry| entry.verified)
     }
 
-    pub(super) fn set_verified(&mut self, id: &Id, revision: u64) {
+    pub(super) fn set_verified(&mut self, id: &QueryId, revision: u64) {
         if let Some(entry) = self.usage.get_mut(id) {
             entry.verified = revision;
         }
     }
 
-    pub(super) fn record(&self, id: &Id) -> Option<Arc<Record>> {
+    pub(super) fn record(&self, id: &QueryId) -> Option<Arc<Record>> {
         self.entries.get(id).map(|entry| entry.record.clone())
     }
 
-    pub(super) fn value(&self, id: &Id, header: &RecordHeader, slot: &Slot) -> Option<Value> {
+    pub(super) fn value(&self, id: &QueryId, header: &RecordHeader, slot: &Slot) -> Option<Value> {
         let entry = self.entries.get(id)?;
         if entry.record.header.values.get(slot)?.version != header.values.get(slot)?.version {
             return None;
@@ -49,7 +49,7 @@ impl SessionStore {
         entry.values.get(slot).cloned()
     }
 
-    pub(super) fn values(&self, id: &Id, header: &RecordHeader) -> BTreeMap<Slot, Value> {
+    pub(super) fn values(&self, id: &QueryId, header: &RecordHeader) -> BTreeMap<Slot, Value> {
         header
             .values
             .keys()
@@ -97,7 +97,7 @@ impl SessionStore {
         })
     }
 
-    pub(super) fn insert(&mut self, id: Id, stored: Stored, now: u64) {
+    pub(super) fn insert(&mut self, id: QueryId, stored: Stored, now: u64) {
         self.remove(&id);
         self.bytes += stored.record.bytes;
         self.usage.insert(
@@ -111,14 +111,14 @@ impl SessionStore {
         self.entries.insert(id, stored);
     }
 
-    pub(super) fn remove(&mut self, id: &Id) {
+    pub(super) fn remove(&mut self, id: &QueryId) {
         self.entries.remove(id);
         if let Some(usage) = self.usage.remove(id) {
             self.bytes -= usage.bytes;
         }
     }
 
-    pub(super) fn touch(&mut self, id: &Id, now: u64) {
+    pub(super) fn touch(&mut self, id: &QueryId, now: u64) {
         if let Some(usage) = self.usage.get_mut(id) {
             usage.used = now;
         }

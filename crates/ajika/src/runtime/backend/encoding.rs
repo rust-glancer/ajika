@@ -13,11 +13,11 @@ use ajika_storage::{Compression, EncodedValue, Write};
 
 use crate::{
     Error, Result,
-    runtime::{record::Id, value::Value},
+    runtime::{record::ValueId, value::Value},
 };
 
 pub(crate) struct PendingValue {
-    pub(crate) id: Id,
+    pub(crate) id: ValueId,
     pub(crate) value: Value,
     pub(crate) length: u64,
 }
@@ -91,7 +91,7 @@ impl PendingValue {
             let started = Instant::now();
             for (value, encoded) in batch.iter().zip(encoded) {
                 check()?;
-                write.write_value(&value.id, encoded)?;
+                write.write_value(&value.id.0, encoded)?;
                 bytes_written += value.length;
             }
             writing += started.elapsed();
