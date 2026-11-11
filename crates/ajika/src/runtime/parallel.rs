@@ -69,6 +69,11 @@ impl<S: Services> Db<'_, S> {
                 let _dispatcher = tracing::dispatcher::set_default(&dispatcher);
                 let _worker = Worker(&self.operation.database.cancellation.inner);
                 loop {
+                    // The coordinator remembers why work stopped. Leave the remaining items
+                    // untouched instead of creating frames just to report the same error again.
+                    if self.check_cancelled().is_err() {
+                        break;
+                    }
                     let index = next.fetch_add(1, Ordering::Relaxed);
                     let Some(item) = items.get(index) else {
                         break;
@@ -85,14 +90,21 @@ impl<S: Services> Db<'_, S> {
                         branch.check_cancelled()?;
                         function(&branch, item)
                     });
+                    let failed = result.is_err();
                     results.lock().expect("parallel results")[index] =
                         Some((result, frame.finish(&mut self.operation.stats())));
+                    if failed {
+                        break;
+                    }
                 }
             };
             thread::scope(|scope| {
                 // The caller always does work too. Nested batches share the spare permits,
                 // so exhausting the thread budget simply leaves this batch on its caller.
                 for _ in 1..items.len() {
+                    if self.check_cancelled().is_err() {
+                        break;
+                    }
                     let acquired = self
                         .operation
                         .spare
@@ -113,12 +125,24 @@ impl<S: Services> Db<'_, S> {
                 worker();
             });
 
+            // A stopped batch can leave unvisited items. Prefer completed branch errors so
+            // callback context survives, then check for cancellation or a caught query failure.
+            let results = results.into_inner().expect("parallel results");
+            if let Some(error) = results
+                .iter()
+                .flatten()
+                .find_map(|(result, _)| result.as_ref().err())
+            {
+                return Err(error.clone());
+            }
+            self.check_cancelled()?;
+
             let mut values = Vec::with_capacity(items.len());
             // Each branch's reads stay in execution order, and branches stay in input order.
             // Later validation can therefore stop at a changed read before replaying reads
             // that depended on it, just as it would for a sequential provider.
-            for result in results.into_inner().expect("parallel results") {
-                let (result, reads) = result.expect("every batch item was visited");
+            for result in results {
+                let (result, reads) = result.expect("successful batch visited every item");
                 values.push(result?);
                 self.frame.reads.lock().expect("query reads").merge(reads)?;
             }

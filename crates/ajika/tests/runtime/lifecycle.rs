@@ -70,7 +70,7 @@ fn cancelling_parallel_demands_drains_them_and_the_next_operation_can_retry() ->
             control.entered.wait();
             cancellation.cancel();
         });
-        db.run(|db| db.parallel_map(&[(), ()], |db, _| wait_for_cancellation(db)))
+        db.run(|db| db.parallel_map(&[(); 32], |db, _| wait_for_cancellation(db)))
     });
     assert!(result.expect_err("operation was cancelled").is_cancelled());
     control.enabled.store(false, Ordering::Release);
