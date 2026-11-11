@@ -102,7 +102,8 @@ struct State {
     // These are active nested calls, not the saved dependency graph. Include calls doing work
     // as well as calls waiting for a claim: both can close a cycle. Parallel branches may make
     // the same parent -> child call, so one branch finishing must not remove another's edge.
-    calls: HashMap<(QueryId, QueryId), usize>,
+    // Group children by parent so traversal only examines each node's outgoing calls.
+    calls: HashMap<QueryId, HashMap<QueryId, usize>>,
     failure: Option<Error>,
 }
 
@@ -126,9 +127,11 @@ impl State {
             return false;
         }
         path.push(from);
-        for (_, child) in self.calls.keys().filter(|(parent, _)| *parent == from) {
-            if self.path(*child, to, seen, path) {
-                return true;
+        if let Some(children) = self.calls.get(&from) {
+            for child in children.keys() {
+                if self.path(*child, to, seen, path) {
+                    return true;
+                }
             }
         }
         path.pop();
@@ -236,7 +239,12 @@ impl Coordination {
                 drop(state);
                 return Err(cycle.into());
             }
-            *state.calls.entry((parent, key)).or_default() += 1;
+            *state
+                .calls
+                .entry(parent)
+                .or_default()
+                .entry(key)
+                .or_default() += 1;
             claim.edge = Some((parent, key));
         }
         loop {
@@ -306,11 +314,18 @@ impl Drop for Claim<'_> {
                 self.coordination.failed.store(true, Ordering::Release);
             }
         }
-        if let Some(edge) = self.edge {
-            let count = state.calls.get_mut(&edge).expect("registered query call");
+        if let Some((parent, child)) = self.edge {
+            let children = state
+                .calls
+                .get_mut(&parent)
+                .expect("registered parent calls");
+            let count = children.get_mut(&child).expect("registered query call");
             *count -= 1;
             if *count == 0 {
-                state.calls.remove(&edge);
+                children.remove(&child);
+            }
+            if children.is_empty() {
+                state.calls.remove(&parent);
             }
         }
         self.coordination.ready.notify_all();
