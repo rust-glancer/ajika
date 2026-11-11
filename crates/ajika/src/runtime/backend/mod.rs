@@ -43,7 +43,7 @@ struct Stored {
 #[derive(Clone, Copy)]
 struct Usage {
     used: u64,
-    // Warm reads defer timestamp writes until collection. Session entries leave this false.
+    // Warm reads defer timestamp writes until collection.
     used_dirty: bool,
     bytes: u64,
     // This proof belongs to the stored record, not a decoded working copy. Reopening starts
