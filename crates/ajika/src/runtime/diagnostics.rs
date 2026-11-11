@@ -8,61 +8,12 @@ use std::fmt;
 
 use super::{
     Operation,
+    evaluate::{OutputOutcome, ReuseReason},
     record::{Address, Dependency, Slot},
 };
 use crate::{Services, codec};
 
 pub(super) const TARGET: &str = "ajika::diagnostics";
-
-/// The existing evidence that lets evaluation skip a provider. Remember which proof succeeded
-/// while loading a value, so the resulting event explains reuse without rechecking anything.
-#[derive(Clone, Copy)]
-pub(super) enum ReuseReason {
-    ResidentValue,
-    ValidityProof,
-    Durability,
-    DependenciesValid,
-}
-
-impl ReuseReason {
-    fn name(self) -> &'static str {
-        match self {
-            Self::ResidentValue => "resident_value",
-            Self::ValidityProof => "validity_proof",
-            Self::Durability => "durability",
-            Self::DependenciesValid => "dependencies_valid",
-        }
-    }
-}
-
-/// What we know about one new answer compared with its predecessor. A fresh version does not
-/// necessarily mean the values differ: a transient predecessor may be unavailable to compare.
-#[derive(Clone, Copy)]
-pub(super) enum OutputOutcome {
-    Added,
-    EqualByComparison,
-    EqualByProof,
-    Unequal,
-    ComparisonUnavailable,
-    Removed,
-}
-
-impl OutputOutcome {
-    pub(super) fn preserves_version(self) -> bool {
-        matches!(self, Self::EqualByComparison | Self::EqualByProof)
-    }
-
-    fn fields(self) -> (&'static str, &'static str, &'static str) {
-        match self {
-            Self::Added => ("added", "none", "created"),
-            Self::EqualByComparison => ("equal", "comparison", "preserved"),
-            Self::EqualByProof => ("equal", "validity_proof", "preserved"),
-            Self::Unequal => ("unequal", "comparison", "advanced"),
-            Self::ComparisonUnavailable => ("comparison_unavailable", "none", "advanced"),
-            Self::Removed => ("removed", "none", "removed"),
-        }
-    }
-}
 
 /// Hex formatting borrows existing IDs; shortening is only a presentation choice.
 pub(super) struct Hex<'a>(pub(super) &'a [u8]);
@@ -110,11 +61,17 @@ impl<S: Services> Operation<'_, S> {
         if tracing::enabled!(target: TARGET, tracing::Level::TRACE) {
             let id = address.id();
             let output = SlotLabel::new(slot);
+            let reason = match reason {
+                ReuseReason::ResidentValue => "resident_value",
+                ReuseReason::ValidityProof => "validity_proof",
+                ReuseReason::Durability => "durability",
+                ReuseReason::DependenciesValid => "dependencies_valid",
+            };
             tracing::trace!(target: TARGET,
                 op = self.id, revision = self.database.revision,
                 query = address.family, call = %Hex(&id.0[..4]), call_id = %Hex(&id.0),
                 output = output.0, output_id = %Hex(&address.value_id(slot).0),
-                reason = reason.name(), "reuse");
+                reason, "reuse");
         }
     }
 
@@ -146,7 +103,16 @@ impl<S: Services> Operation<'_, S> {
         if tracing::enabled!(target: TARGET, tracing::Level::TRACE) {
             let id = address.id();
             let output = SlotLabel::new(slot);
-            let (result, evidence, version) = outcome.fields();
+            let (result, evidence, version) = match outcome {
+                OutputOutcome::Added => ("added", "none", "created"),
+                OutputOutcome::EqualByComparison => ("equal", "comparison", "preserved"),
+                OutputOutcome::EqualByProof => ("equal", "validity_proof", "preserved"),
+                OutputOutcome::Unequal => ("unequal", "comparison", "advanced"),
+                OutputOutcome::ComparisonUnavailable => {
+                    ("comparison_unavailable", "none", "advanced")
+                }
+                OutputOutcome::Removed => ("removed", "none", "removed"),
+            };
             tracing::trace!(target: TARGET,
                 op = self.id, revision = self.database.revision,
                 query = address.family, call = %Hex(&id.0[..4]), call_id = %Hex(&id.0),
