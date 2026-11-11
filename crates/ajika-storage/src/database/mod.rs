@@ -12,7 +12,7 @@ use std::{
     path::{Path, PathBuf},
     sync::{
         Mutex, RwLock,
-        atomic::{AtomicBool, AtomicU64, Ordering},
+        atomic::{AtomicBool, Ordering},
     },
 };
 
@@ -30,6 +30,12 @@ use crate::{
 const INDEX_FILE: &str = "index.redb";
 const INDEX_CACHE_BYTES: usize = 8 * 1024 * 1024;
 const REBUILD_FILE: &str = "index.rebuild.redb";
+
+#[derive(Clone, Copy)]
+struct DiskUsage {
+    index_bytes: u64,
+    pack_bytes: u64,
+}
 
 /// A key and its assigned ID within a namespace. Pass existing assignments to
 /// [`Database::rebuild`] so callers can keep using their IDs after an index is replaced.
@@ -71,8 +77,10 @@ pub struct Database {
     pub(crate) instance: InstanceId,
     pub(crate) access: RwLock<()>,
     pub(crate) healthy: AtomicBool,
-    pub(crate) physical_bytes: AtomicU64,
-    pub(crate) maintenance_due: AtomicBool,
+    // Unknown totals require reconciliation before a writer can calculate its budget.
+    disk_usage: Mutex<Option<DiskUsage>>,
+    pub(crate) reconciliation_due: AtomicBool,
+    pub(crate) compaction_due: AtomicBool,
     pub(crate) options: Options,
     // A handful of ordinary file handles amortizes opens. No mappings or decoded values live
     // here. Writes clear the cache while holding exclusive access before unlinking old files.
@@ -105,8 +113,9 @@ impl Database {
                 instance: InstanceId([0; 16]),
                 access: RwLock::new(()),
                 healthy: AtomicBool::new(false),
-                physical_bytes: AtomicU64::new(0),
-                maintenance_due: AtomicBool::new(true),
+                disk_usage: Mutex::default(),
+                reconciliation_due: AtomicBool::new(true),
+                compaction_due: AtomicBool::new(true),
                 options,
                 files: Mutex::default(),
                 _owner: owner,
@@ -156,6 +165,8 @@ impl Database {
 
     fn load_index(&mut self, create: bool) -> Result<()> {
         self.healthy.store(false, Ordering::Release);
+        *self.disk_usage.get_mut().expect("disk usage") = None;
+        self.reconciliation_due.store(true, Ordering::Relaxed);
         self.files.get_mut().expect("pack handles").clear();
         self.index.take();
 
@@ -272,24 +283,14 @@ impl Database {
         // Sync the directory before deleting old packs. If a crash restores the old
         // `index.redb` directory entry, that catalog still needs its packs.
         PackWriter::sync_directory(&self.root)?;
-        if let Err(error) = self.clean_orphans() {
-            // Pack deletion can wait. An unreadable catalog blocks recovery.
-            if error.requires_reopen() || error.kind() == ErrorKind::InvalidCache {
-                return Err(error);
-            }
-            tracing::warn!(
-                %error,
-                cause = error.source().map(tracing::field::display),
-                path = %self.root.display(),
-                "pack cleanup deferred"
-            );
+        if self.reconciliation_needed() {
+            self.reconcile_files()?;
         }
         if let Err(error) = self.remove_replacement() {
             tracing::warn!(%error, path = %self.root.display(), "index cleanup deferred");
         }
-        self.refresh_physical_bytes()?;
         self.healthy.store(true, Ordering::Release);
-        self.maintenance_due.store(true, Ordering::Relaxed);
+        self.compaction_due.store(true, Ordering::Relaxed);
         Ok(())
     }
 
@@ -424,15 +425,16 @@ impl Database {
 
     /// Finish pack reclamation and shrink the index. This explicit idle operation is unbounded;
     /// ordinary query operations use the small passes in [`Self::maintain`] instead.
+    /// Orphan deletion failures are logged and retried; those files remain charged to the budget.
     pub fn compact(&mut self) -> Result<bool> {
         let mut changed = false;
         while self.compact_step(true)? {
             changed = true;
         }
-        self.files.get_mut().expect("pack handles").clear();
-        self.clean_orphans()?;
+        self.reconcile_files()?;
         changed |= self.index.as_mut().expect("healthy index").compact()?;
-        self.refresh_physical_bytes()?;
+        self.refresh_index_usage()?;
+        self.compaction_due.store(false, Ordering::Relaxed);
         Ok(changed)
     }
 
@@ -442,28 +444,120 @@ impl Database {
         self.options
             .max_physical_bytes
             .saturating_sub(headroom)
-            .saturating_sub(self.physical_bytes.load(Ordering::Relaxed))
+            .saturating_sub(self.physical_bytes())
     }
 
-    /// Remove files that neither a successful checkpoint nor its live values can reach.
-    /// This is used only while opening, or under exclusive access after publication.
-    pub(crate) fn clean_orphans(&self) -> Result<()> {
+    pub(crate) fn physical_bytes(&self) -> u64 {
+        self.disk_usage
+            .lock()
+            .expect("disk usage")
+            .map_or(u64::MAX, |usage| {
+                usage.index_bytes.saturating_add(usage.pack_bytes)
+            })
+    }
+
+    /// Normal commits only need to measure the new packs and retire packs made empty by that
+    /// transaction. Existing live files are immutable, so their allocation remains unchanged.
+    pub(crate) fn finish_file_changes(
+        &self,
+        created: &[PathBuf],
+        retired: &[PackId],
+    ) -> Result<()> {
+        // Remove the known totals while files change. An early error then leaves no stale
+        // budget installed; the caller requests reconciliation before another writer starts.
+        let mut usage = self
+            .disk_usage
+            .lock()
+            .expect("disk usage")
+            .take()
+            .expect("reconciled disk usage");
+        for path in created {
+            let metadata = fs::metadata(path).map_err(|error| Error::from(error).at(path))?;
+            usage.pack_bytes = usage
+                .pack_bytes
+                .checked_add(Self::allocated(&metadata))
+                .ok_or_else(|| Error::unavailable("storage size needs reconciliation"))?;
+        }
+
+        // A pack can be created and emptied in the same write. Count new files before
+        // subtracting retired ones so that such a pack has no net charge.
+        if !retired.is_empty() {
+            self.files.lock().expect("pack handles").clear();
+        }
+        for id in retired {
+            let path = PackWriter::path(&self.packs, id);
+            let metadata = fs::metadata(&path).map_err(|error| Error::from(error).at(&path))?;
+            fs::remove_file(&path).map_err(|error| Error::from(error).at(&path))?;
+            usage.pack_bytes = usage
+                .pack_bytes
+                .checked_sub(Self::allocated(&metadata))
+                .ok_or_else(|| Error::unavailable("storage size needs reconciliation"))?;
+        }
+        usage.index_bytes = Self::allocated(&fs::metadata(self.root.join(INDEX_FILE))?);
+        *self.disk_usage.lock().expect("disk usage") = Some(usage);
+        Ok(())
+    }
+
+    /// Rolling back a transaction or compacting the index can change its physical allocation
+    /// without changing any pack files. Refresh just that part of the budget.
+    pub(crate) fn refresh_index_usage(&self) -> Result<()> {
+        let metadata = fs::metadata(self.root.join(INDEX_FILE))?;
+        let mut usage = self.disk_usage.lock().expect("disk usage");
+        usage.as_mut().expect("reconciled disk usage").index_bytes = Self::allocated(&metadata);
+        Ok(())
+    }
+
+    /// File changes or an unknown budget require reconciliation. Ordinary compaction
+    /// has its own scheduling flag and does not require discovering or measuring every file.
+    pub(crate) fn reconciliation_needed(&self) -> bool {
+        self.reconciliation_due.load(Ordering::Relaxed)
+            || self.disk_usage.lock().expect("disk usage").is_none()
+    }
+
+    /// Rebuild usage from the published catalog and actual files, under exclusive access.
+    /// An undeleted orphan stays counted and scheduled for retry. Errors mean that the catalog
+    /// or the remaining files could not be read well enough to establish a trustworthy budget.
+    pub(crate) fn reconcile_files(&self) -> Result<()> {
+        *self.disk_usage.lock().expect("disk usage") = None;
+        self.reconciliation_due.store(true, Ordering::Relaxed);
+        self.files.lock().expect("pack handles").clear();
         let read = self.index.as_ref().expect("published index").begin_read()?;
         let mut keep = HashSet::new();
         for entry in read.open_table(PACKS)?.iter()? {
             let (id, _) = entry?;
             keep.insert(PackWriter::path(&self.packs, id.value()));
         }
+
+        // Try deleting each orphan, then measure the files that remain. A deletion failure is
+        // deferred locally; it does not make the size of a readable file unknown.
+        let mut cleanup_deferred = false;
+        let mut pack_bytes = 0;
         for entry in fs::read_dir(&self.packs)? {
-            let path = entry?.path();
+            let entry = entry?;
+            let path = entry.path();
             if path
                 .extension()
                 .is_some_and(|extension| extension == "pack")
                 && !keep.contains(&path)
             {
-                fs::remove_file(path)?;
+                match fs::remove_file(&path) {
+                    Ok(()) => continue,
+                    Err(error) if error.kind() == io::ErrorKind::NotFound => continue,
+                    Err(error) => {
+                        cleanup_deferred = true;
+                        tracing::warn!(%error, path = %path.display(), "pack cleanup deferred");
+                    }
+                }
             }
+            pack_bytes += Self::allocated(&entry.metadata()?);
         }
+        let index_bytes = Self::allocated(&fs::metadata(self.root.join(INDEX_FILE))?);
+        *self.disk_usage.lock().expect("disk usage") = Some(DiskUsage {
+            index_bytes,
+            pack_bytes,
+        });
+        self.reconciliation_due
+            .store(cleanup_deferred, Ordering::Relaxed);
         Ok(())
     }
 
@@ -477,15 +571,6 @@ impl Database {
         {
             metadata.len()
         }
-    }
-
-    pub(crate) fn refresh_physical_bytes(&self) -> Result<()> {
-        let mut bytes = Self::allocated(&fs::metadata(self.root.join(INDEX_FILE))?);
-        for entry in fs::read_dir(&self.packs)? {
-            bytes += Self::allocated(&entry?.metadata()?);
-        }
-        self.physical_bytes.store(bytes, Ordering::Relaxed);
-        Ok(())
     }
 
     /// Inspect contents without decoding payloads. This scans storage metadata, so use it for

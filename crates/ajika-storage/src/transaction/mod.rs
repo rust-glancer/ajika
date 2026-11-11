@@ -26,36 +26,59 @@ use crate::{
     value::INLINE_BYTES,
 };
 
+// Reconciliation can change the available bytes, so choose the kind of limit here
+// and calculate the budget after refreshing disk usage under the write lock.
+enum WriteMode {
+    Normal,
+    Maintenance,
+}
+
 /// A checkpoint under construction. Dropping it before commit preserves the previous checkpoint.
 /// Reads must finish before beginning a write on the same database.
 pub struct Write<'a> {
     pub(crate) transaction: redb::WriteTransaction,
     database: &'a Database,
-    pub(crate) packs: PackWriter,
+    pub(crate) packs: PackWriter<'a>,
     pub(crate) changed_packs: BTreeMap<PackId, PackInfo>,
     _guard: RwLockWriteGuard<'a, ()>,
 }
 
 impl<'a> Write<'a> {
     pub(crate) fn new(database: &'a Database) -> Result<Self> {
-        Self::with_budget(database, database.write_budget())
+        Self::start(database, WriteMode::Normal)
     }
 
     /// Maintenance is bounded by its scan/copy pass, not by the exhausted normal-write budget.
     /// It must still be able to release space after index growth crosses that soft limit.
     pub(crate) fn maintenance(database: &'a Database) -> Result<Self> {
-        Self::with_budget(database, u64::MAX)
+        Self::start(database, WriteMode::Maintenance)
     }
 
-    fn with_budget(database: &'a Database, remaining: u64) -> Result<Self> {
+    fn start(database: &'a Database, mode: WriteMode) -> Result<Self> {
         let guard = database
             .access
             .try_write()
             .map_err(|_| Error::access_conflict("finish storage reads before starting a write"))?;
+        let index = database.index()?;
+        if database.reconciliation_needed() {
+            database.reconcile_files()?;
+        }
+        // A previous transaction may have grown the index even if it was rolled back.
+        // Refresh it before calculating the budget, while this writer has exclusive access.
+        database.refresh_index_usage()?;
+        let remaining = match mode {
+            WriteMode::Normal => database.write_budget(),
+            WriteMode::Maintenance => u64::MAX,
+        };
         Ok(Self {
-            transaction: database.index()?.begin_write()?,
+            transaction: index.begin_write()?,
             database,
-            packs: PackWriter::new(database.packs.clone(), database.instance, remaining),
+            packs: PackWriter::new(
+                &database.packs,
+                database.instance,
+                remaining,
+                &database.reconciliation_due,
+            ),
             changed_packs: BTreeMap::new(),
             _guard: guard,
         })
@@ -171,11 +194,13 @@ impl<'a> Write<'a> {
     pub fn commit(mut self) -> Result<()> {
         // Sync new packs before committing an index that can reference them.
         let sync_time = self.packs.finish()?;
+        let mut retired = Vec::new();
         {
             let mut table = self.transaction.open_table(PACKS)?;
             for (id, info) in &self.changed_packs {
                 if info.live_values == 0 {
                     table.remove(id)?;
+                    retired.push(*id);
                 } else {
                     table.insert(id, format::encode(info)?.as_slice())?;
                 }
@@ -191,32 +216,25 @@ impl<'a> Write<'a> {
         }
         let commit_time = committing.elapsed();
         if !self.changed_packs.is_empty() {
-            self.database.maintenance_due.store(true, Ordering::Relaxed);
+            self.database.compaction_due.store(true, Ordering::Relaxed);
         }
-        // No reader or cached handle may keep an obsolete file open when it is unlinked.
-        self.database.files.lock().expect("pack handles").clear();
-        if let Err(error) = self.database.clean_orphans() {
-            tracing::warn!(
-                %error,
-                cause = error.source().map(tracing::field::display),
-                "pack cleanup deferred until reopen"
-            );
-        }
-        if let Err(error) = self.database.refresh_physical_bytes() {
-            // If accounting is unavailable, stop accepting writes rather than bypass the limit.
+        if let Err(error) = self
+            .database
+            .finish_file_changes(self.packs.created_paths(), &retired)
+        {
             self.database
-                .physical_bytes
-                .store(u64::MAX, Ordering::Relaxed);
+                .reconciliation_due
+                .store(true, Ordering::Relaxed);
             tracing::warn!(
                 %error,
                 cause = error.source().map(tracing::field::display),
-                "could not measure packed cache size"
+                "file cleanup and accounting deferred"
             );
         }
         tracing::debug!(
             ?sync_time,
             ?commit_time,
-            physical_bytes = self.database.physical_bytes.load(Ordering::Relaxed),
+            physical_bytes = self.database.physical_bytes(),
             "packed checkpoint committed"
         );
         Ok(())

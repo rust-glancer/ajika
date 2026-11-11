@@ -8,6 +8,7 @@ use std::{
     fs::{self, File},
     io::{BufWriter, Read, Write},
     path::{Path, PathBuf},
+    sync::atomic::{AtomicBool, Ordering},
     time::{Duration, Instant},
 };
 
@@ -19,9 +20,10 @@ use crate::{
 
 const TARGET_BYTES: u64 = 64 * 1024 * 1024;
 
-pub(crate) struct PackWriter {
-    directory: PathBuf,
+pub(crate) struct PackWriter<'a> {
+    directory: &'a Path,
     instance: InstanceId,
+    reconciliation_due: &'a AtomicBool,
     current: Option<OpenPack>,
     // Includes files whose initialization failed, so abort can remove them too.
     created: Vec<PathBuf>,
@@ -32,11 +34,17 @@ pub(crate) struct PackWriter {
     sync_time: Duration,
 }
 
-impl PackWriter {
-    pub(crate) fn new(directory: PathBuf, instance: InstanceId, remaining: u64) -> Self {
+impl<'a> PackWriter<'a> {
+    pub(crate) fn new(
+        directory: &'a Path,
+        instance: InstanceId,
+        remaining: u64,
+        reconciliation_due: &'a AtomicBool,
+    ) -> Self {
         Self {
             directory,
             instance,
+            reconciliation_due,
             current: None,
             created: Vec::new(),
             written: 0,
@@ -128,7 +136,7 @@ impl PackWriter {
         if self.current.is_none() {
             self.reserve(PackHeader::LENGTH)?;
             let id = format::new_id()?;
-            let path = Self::path(&self.directory, &id);
+            let path = Self::path(self.directory, &id);
             let file = File::create_new(&path)?;
             self.created.push(path);
             let mut writer = BufWriter::with_capacity(64 * 1024, file);
@@ -174,7 +182,7 @@ impl PackWriter {
         self.seal()?;
         if !self.created.is_empty() {
             let started = Instant::now();
-            Self::sync_directory(&self.directory)?;
+            Self::sync_directory(self.directory)?;
             self.sync_time += started.elapsed();
         }
         Ok(self.sync_time)
@@ -182,6 +190,10 @@ impl PackWriter {
 
     pub(crate) fn commit_attempted(&mut self) {
         self.commit_attempted = true;
+    }
+
+    pub(crate) fn created_paths(&self) -> &[PathBuf] {
+        &self.created
     }
 
     pub(crate) fn path(directory: &Path, id: &PackId) -> PathBuf {
@@ -204,14 +216,19 @@ impl PackWriter {
     }
 }
 
-impl Drop for PackWriter {
+impl Drop for PackWriter<'_> {
     fn drop(&mut self) {
         // Close handles before unlinking, including on Windows. A commit error may mean the
         // index was published, so leave those files for catalog-based cleanup on reopen.
         self.current.take();
         if !self.commit_attempted {
             for path in &self.created {
-                if let Err(error) = fs::remove_file(path) {
+                if let Err(error) = fs::remove_file(path)
+                    && error.kind() != std::io::ErrorKind::NotFound
+                {
+                    // These files were never counted by a successful commit. A failed
+                    // deletion needs discovery and accounting before another payload write.
+                    self.reconciliation_due.store(true, Ordering::Relaxed);
                     tracing::warn!(%error, path = %path.display(), "could not remove abandoned pack");
                 }
             }

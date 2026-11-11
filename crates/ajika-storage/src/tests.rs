@@ -94,6 +94,71 @@ fn only_committed_replacements_become_visible() -> Result<()> {
 }
 
 #[test]
+fn replacing_values_and_aborting_writes_reuses_the_physical_budget() -> Result<()> {
+    let root = tempfile::tempdir()?;
+    let database = Database::open(root.path(), "fixture", Options::default())?;
+    let initial_bytes = database.statistics()?.allocated_bytes;
+    drop(database);
+    let database = Database::open(
+        root.path(),
+        "fixture",
+        Options {
+            max_physical_bytes: initial_bytes + 32 * 1024 * 1024,
+            ..Options::default()
+        },
+    )?;
+
+    // The budget has room for a replacement and its predecessor, but not for the cumulative
+    // history of these writes. Both committed retirement and rollback must release their charge.
+    for byte in 0..16 {
+        let mut write = database.begin_write()?;
+        write.write_value(
+            &[1; 32],
+            Compression::None.encode(vec![byte; 4 * 1024 * 1024])?,
+        )?;
+        write.commit()?;
+
+        let mut pending = database.begin_write()?;
+        pending.write_value(
+            &[2; 32],
+            Compression::None.encode(vec![42; 4 * 1024 * 1024])?,
+        )?;
+        drop(pending);
+
+        let write = database.begin_write()?;
+        write.set_metadata(&[1; 32], &[byte])?;
+        write.commit()?;
+    }
+    let stats = database.statistics()?;
+    assert_eq!((stats.values, stats.pack_files), (1, 1));
+    assert_eq!(
+        database.snapshot()?.read_value(&[1; 32], 4 * 1024 * 1024)?,
+        vec![15; 4 * 1024 * 1024]
+    );
+    assert_eq!(database.snapshot()?.metadata(&[1; 32])?, Some(vec![15]));
+    Ok(())
+}
+
+#[test]
+fn replacing_a_pending_value_inline_retires_its_new_pack() -> Result<()> {
+    let root = tempfile::tempdir()?;
+    let database = Database::open(root.path(), "fixture", Options::default())?;
+    let mut write = database.begin_write()?;
+    write.write_value(&[1; 32], Compression::None.encode(vec![42; 32_000])?)?;
+    write.write_value(
+        &[1; 32],
+        Compression::None.encode(b"small replacement".to_vec())?,
+    )?;
+    write.commit()?;
+    assert_eq!(database.statistics()?.pack_files, 0);
+    assert_eq!(
+        database.snapshot()?.read_value(&[1; 32], 17)?,
+        b"small replacement"
+    );
+    Ok(())
+}
+
+#[test]
 fn removing_neighbors_keeps_live_frames_until_the_pack_is_empty() -> Result<()> {
     let root = tempfile::tempdir()?;
     let mut database = Database::open(root.path(), "fixture", Options::default())?;
