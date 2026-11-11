@@ -51,6 +51,49 @@ fn answer(db: &Db) -> ajika::Result<String> {
     Ok(format!("answer:{}", document(db)?.0.value(db)?))
 }
 
+#[ajika::input(key = (), lifetime = Operation)]
+struct Request {
+    label: String,
+}
+
+#[ajika::query]
+fn request_label(db: &Db) -> ajika::Result<String> {
+    Request::at(()).label(db)
+}
+
+#[test]
+fn one_checkpoint_retains_each_lifetime_in_its_own_store() -> Result<()> {
+    for disk in [false, true] {
+        let directory = tempfile::tempdir()?;
+        let inputs = Source {
+            text: "edited",
+            lifetime: Lifetime::Session,
+        }
+        .capture()
+        .edit(|update| Request::at(()).set_label(update, "request".to_owned()))?;
+        let mut db = if disk {
+            Database::open(directory.path(), "test", inputs, (), retention())?
+        } else {
+            Database::memory(inputs, (), retention())
+        };
+
+        // One checkpoint contains persistent, session and operation work. On the next request,
+        // only the operation result needs execution; the other answers keep their own backing.
+        for expected_executions in [4, 1] {
+            db.run(|cx| {
+                assert_eq!(*super::leaf(cx, 7)?, 7);
+                assert_eq!(&*answer(cx)?, "answer:edited");
+                assert_eq!(&*request_label(cx)?, "request");
+                Ok(())
+            })?;
+            assert_eq!(db.statistics().executed, expected_executions);
+            assert_eq!(db.statistics().stored_queries, 1);
+            assert_eq!(db.statistics().session_queries, 2);
+        }
+    }
+    Ok(())
+}
+
 #[test]
 fn editor_results_survive_requests_and_save_without_recomputation() -> Result<()> {
     let directory = tempfile::tempdir()?;
