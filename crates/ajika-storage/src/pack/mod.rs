@@ -14,14 +14,14 @@ use std::{
 use crate::{
     EncodedValue, Error, Id, Result,
     error::ensure,
-    format::{self, FrameHeader, Location, PackHeader, PackId},
+    format::{self, FrameHeader, InstanceId, Location, PackHeader, PackId},
 };
 
 const TARGET_BYTES: u64 = 64 * 1024 * 1024;
 
 pub(crate) struct PackWriter {
     directory: PathBuf,
-    instance: PackId,
+    instance: InstanceId,
     current: Option<OpenPack>,
     // Includes files whose initialization failed, so abort can remove them too.
     created: Vec<PathBuf>,
@@ -33,7 +33,7 @@ pub(crate) struct PackWriter {
 }
 
 impl PackWriter {
-    pub(crate) fn new(directory: PathBuf, instance: PackId, remaining: u64) -> Self {
+    pub(crate) fn new(directory: PathBuf, instance: InstanceId, remaining: u64) -> Self {
         Self {
             directory,
             instance,

@@ -21,7 +21,9 @@ use redb::{ReadableDatabase, ReadableTable};
 use crate::{
     Compression, Error, ErrorKind, Read, Result, Statistics, Write,
     error::ensure,
-    format::{self, HEADER, IDENTITIES, PACKS, PackHeader, PackId, PackInfo, RECORDS, VALUES},
+    format::{
+        self, HEADER, IDENTITIES, InstanceId, PACKS, PackHeader, PackId, PackInfo, RECORDS, VALUES,
+    },
     pack::PackWriter,
 };
 
@@ -66,7 +68,7 @@ pub struct Database {
     epoch: String,
     pub(crate) root: PathBuf,
     pub(crate) packs: PathBuf,
-    pub(crate) instance: PackId,
+    pub(crate) instance: InstanceId,
     pub(crate) access: RwLock<()>,
     pub(crate) healthy: AtomicBool,
     pub(crate) physical_bytes: AtomicU64,
@@ -100,7 +102,7 @@ impl Database {
                 epoch: format!("{}:{epoch}", format::FORMAT),
                 root: path.to_owned(),
                 packs: path.join("packs"),
-                instance: [0; 16],
+                instance: InstanceId([0; 16]),
                 access: RwLock::new(()),
                 healthy: AtomicBool::new(false),
                 physical_bytes: AtomicU64::new(0),
@@ -183,7 +185,7 @@ impl Database {
         Ok(())
     }
 
-    fn read_index_instance(&self, index: &redb::Database) -> Result<Option<PackId>> {
+    fn read_index_instance(&self, index: &redb::Database) -> Result<Option<InstanceId>> {
         let read = index.begin_read()?;
         let header = match read.open_table(HEADER) {
             Ok(header) => header,
@@ -196,12 +198,14 @@ impl Database {
         {
             return Ok(None);
         }
-        let instance = header
-            .get("instance")?
-            .ok_or_else(|| Error::invalid_cache("missing storage instance"))?
-            .value()
-            .try_into()
-            .map_err(Error::invalid_source)?;
+        let instance = InstanceId(
+            header
+                .get("instance")?
+                .ok_or_else(|| Error::invalid_cache("missing storage instance"))?
+                .value()
+                .try_into()
+                .map_err(Error::invalid_source)?,
+        );
         Ok(Some(instance))
     }
 
@@ -209,13 +213,13 @@ impl Database {
         &self,
         index: &redb::Database,
         identities: &[Identity<'_>],
-    ) -> Result<PackId> {
-        let instance = format::new_id()?;
+    ) -> Result<InstanceId> {
+        let instance = InstanceId(format::new_id()?);
         let write = index.begin_write()?;
         {
             let mut header = write.open_table(HEADER)?;
             header.insert("epoch", self.epoch.as_bytes())?;
-            header.insert("instance", instance.as_slice())?;
+            header.insert("instance", instance.0.as_slice())?;
         }
         // Commit the epoch and cleared catalog together so a restart sees a matching pair.
         Self::clear_catalog(&write, Some(identities))?;
