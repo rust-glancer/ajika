@@ -5,6 +5,7 @@ use std::{
         atomic::{AtomicBool, Ordering},
     },
     thread,
+    time::Duration,
 };
 
 use ajika::{Database, Inputs, QueryCycle, ResultExt as _, Retention};
@@ -69,7 +70,7 @@ fn cancelling_parallel_demands_drains_them_and_the_next_operation_can_retry() ->
             control.entered.wait();
             cancellation.cancel();
         });
-        db.run(|db| db.parallel_map(&[(), ()], |db, _| wait_for_cancellation(db)))
+        db.run(|db| db.parallel_map(&[(); 32], |db, _| wait_for_cancellation(db)))
     });
     assert!(result.expect_err("operation was cancelled").is_cancelled());
     control.enabled.store(false, Ordering::Release);
@@ -292,6 +293,40 @@ fn replacing_large_payloads_reclaims_their_logical_storage() -> Result<()> {
     let mut db = Database::open(&path, "test", inputs("small"), (), retention())?;
     assert_eq!(db.run(|db| tree(db, 1))?.as_str(), "1:small");
     assert_eq!(db.statistics().executed, 0);
+    Ok(())
+}
+
+#[test]
+fn recently_used_queries_survive_eviction_after_restart() -> Result<()> {
+    let directory = tempfile::tempdir()?;
+    let path = directory.path().join("queries");
+    let mut db = Database::open(&path, "test", Inputs::default(), (), retention())?;
+
+    // Persist distinct creation times, then make the older query the most recently used.
+    // The pauses separate millisecond timestamps without relying on an idle-expiry deadline.
+    db.run(|db| leaf(db, 1))?;
+    thread::sleep(Duration::from_millis(2));
+    db.run(|db| leaf(db, 2))?;
+    thread::sleep(Duration::from_millis(2));
+    db.run(|db| leaf(db, 1))?;
+    assert_eq!(db.statistics().executed, 0);
+    assert_eq!(db.collect()?, 0);
+    drop(db);
+
+    let limits = Retention {
+        max_entries: 1,
+        ..retention()
+    };
+    let mut db = Database::open(&path, "test", Inputs::default(), (), limits)?;
+    assert_eq!(db.collect()?, 1);
+    assert_eq!(*db.run(|db| leaf(db, 1))?, 1);
+    assert_eq!(
+        db.statistics().executed,
+        0,
+        "the recently read query survived"
+    );
+    assert_eq!(*db.run(|db| leaf(db, 2))?, 2);
+    assert_eq!(db.statistics().executed, 1, "the older query was evicted");
     Ok(())
 }
 

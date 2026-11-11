@@ -22,7 +22,7 @@ fn application_payload_and_context_survive_parallel_sharing() -> anyhow::Result<
     let mut database = ajika::Database::memory(inputs(""), (), retention());
     database.set_parallelism(2);
     let result = database.run(|db| {
-        db.parallel_map(&[(), ()], |db, _| resource(db))
+        db.parallel_map(&[(); 32], |db, _| resource(db))
             .context("loading resources")
     });
     let error = result.expect_err("resource provider returned a failure");

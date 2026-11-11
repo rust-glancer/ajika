@@ -22,6 +22,10 @@ pub(crate) const PACKS: TableDefinition<&PackId, &[u8]> = TableDefinition::new("
 
 pub(crate) type PackId = [u8; 16];
 
+/// Saved in the index and each pack header so opening can reject packs from another instance.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, SchemaRead, SchemaWrite)]
+pub(crate) struct InstanceId(pub(crate) [u8; 16]);
+
 #[derive(SchemaRead, SchemaWrite)]
 pub(crate) enum Location {
     Inline(Vec<u8>),
@@ -53,7 +57,7 @@ impl PackInfo {
 #[derive(Debug, PartialEq, Eq, SchemaRead, SchemaWrite)]
 pub(crate) struct PackHeader {
     pub(crate) magic: [u8; 8],
-    pub(crate) instance: PackId,
+    pub(crate) instance: InstanceId,
     pub(crate) pack: PackId,
 }
 
@@ -91,7 +95,7 @@ pub(crate) fn decode<T: SchemaReadOwned<DefaultConfig, Dst = T>>(bytes: &[u8]) -
     wincode::deserialize_exact(bytes).map_err(Error::invalid_source)
 }
 
-pub(crate) fn new_id() -> Result<PackId> {
+pub(crate) fn new_id() -> Result<[u8; 16]> {
     let mut id = [0; 16];
     getrandom::fill(&mut id)?;
     Ok(id)

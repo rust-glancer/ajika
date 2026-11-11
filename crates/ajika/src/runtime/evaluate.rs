@@ -10,7 +10,7 @@ use std::{collections::BTreeMap, sync::Arc};
 use super::{
     Db, Output, OutputSlot,
     cache::Memo,
-    diagnostics::{self, OutputOutcome, ReuseReason},
+    diagnostics,
     frame::Frame,
     record::{Address, Dependency, Record, RecordHeader, Slot, ValueRecord},
     value::{Codec, Value},
@@ -19,6 +19,34 @@ use crate::{
     Durability, Error, Input, Lifetime, Persist, Query, Result, Services, UnavailableData,
     error::ensure,
 };
+
+/// The existing evidence that lets evaluation skip a provider. Remember which proof succeeded
+/// while loading a value, so the resulting event explains reuse without rechecking anything.
+#[derive(Clone, Copy)]
+pub(super) enum ReuseReason {
+    ResidentValue,
+    ValidityProof,
+    Durability,
+    DependenciesValid,
+}
+
+/// What we know about one new answer compared with its predecessor. A fresh version does not
+/// necessarily mean the values differ: a transient predecessor may be unavailable to compare.
+#[derive(Clone, Copy)]
+pub(super) enum OutputOutcome {
+    Added,
+    EqualByComparison,
+    EqualByProof,
+    Unequal,
+    ComparisonUnavailable,
+    Removed,
+}
+
+impl OutputOutcome {
+    fn preserves_version(self) -> bool {
+        matches!(self, Self::EqualByComparison | Self::EqualByProof)
+    }
+}
 
 impl<'db, S: Services> Db<'db, S> {
     /// Ask query Q for the answer to `key` under this operation's captured inputs.

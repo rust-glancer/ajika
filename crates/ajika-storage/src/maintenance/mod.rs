@@ -30,12 +30,22 @@ impl Database {
     /// Run one small reclamation pass between operations if needed. A single large value can
     /// make the pass exceed its usual work budget.
     pub fn maintain(&self) -> Result<()> {
-        if self.maintenance_due.swap(false, Ordering::Relaxed)
-            && let Err(error) = self.compact_step(false)
-        {
-            // A temporary error can interrupt reclamation. Keep the pass due for a later call.
-            self.maintenance_due.store(true, Ordering::Relaxed);
-            return Err(error.at(&self.root));
+        // A compaction writer reconciles pending file changes before starting. If only orphan
+        // cleanup is due, run it directly without scheduling a compaction pass or opening a writer.
+        if self.compaction_due.swap(false, Ordering::Relaxed) {
+            if let Err(error) = self.compact_step(false) {
+                // A temporary error can interrupt reclamation. Keep the pass due for a later call.
+                self.compaction_due.store(true, Ordering::Relaxed);
+                return Err(error.at(&self.root));
+            }
+        } else if self.reconciliation_needed() {
+            let _guard = self.access.try_write().map_err(|_| {
+                Error::access_conflict("finish storage access before file reconciliation")
+                    .at(&self.root)
+            })?;
+            self.index()?;
+            self.reconcile_files()
+                .map_err(|error| error.at(&self.root))?;
         }
         Ok(())
     }

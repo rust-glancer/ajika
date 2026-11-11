@@ -9,47 +9,54 @@ use std::{
     sync::Arc,
 };
 
-use super::{Stored, Usage};
+use super::Stored;
 use crate::{
     Result, Retention, codec,
     runtime::{
-        record::{Id, Record, RecordHeader, Slot},
+        record::{QueryId, Record, RecordHeader, Slot},
         value::Value,
     },
 };
 
+struct Entry {
+    stored: Stored,
+    used: u64,
+    verified: u64,
+}
+
 #[derive(Default)]
 pub(super) struct SessionStore {
-    entries: HashMap<Id, Stored>,
-    usage: HashMap<Id, Usage>,
+    entries: HashMap<QueryId, Entry>,
     bytes: u64,
     last_collection: u64,
 }
 
 impl SessionStore {
-    pub(super) fn verified(&self, id: &Id) -> Option<u64> {
-        self.usage.get(id).map(|entry| entry.verified)
+    pub(super) fn verified(&self, id: &QueryId) -> Option<u64> {
+        self.entries.get(id).map(|entry| entry.verified)
     }
 
-    pub(super) fn set_verified(&mut self, id: &Id, revision: u64) {
-        if let Some(entry) = self.usage.get_mut(id) {
+    pub(super) fn set_verified(&mut self, id: &QueryId, revision: u64) {
+        if let Some(entry) = self.entries.get_mut(id) {
             entry.verified = revision;
         }
     }
 
-    pub(super) fn record(&self, id: &Id) -> Option<Arc<Record>> {
-        self.entries.get(id).map(|entry| entry.record.clone())
+    pub(super) fn record(&self, id: &QueryId) -> Option<Arc<Record>> {
+        self.entries
+            .get(id)
+            .map(|entry| entry.stored.record.clone())
     }
 
-    pub(super) fn value(&self, id: &Id, header: &RecordHeader, slot: &Slot) -> Option<Value> {
-        let entry = self.entries.get(id)?;
-        if entry.record.header.values.get(slot)?.version != header.values.get(slot)?.version {
+    pub(super) fn value(&self, id: &QueryId, header: &RecordHeader, slot: &Slot) -> Option<Value> {
+        let stored = &self.entries.get(id)?.stored;
+        if stored.record.header.values.get(slot)?.version != header.values.get(slot)?.version {
             return None;
         }
-        entry.values.get(slot).cloned()
+        stored.values.get(slot).cloned()
     }
 
-    pub(super) fn values(&self, id: &Id, header: &RecordHeader) -> BTreeMap<Slot, Value> {
+    pub(super) fn values(&self, id: &QueryId, header: &RecordHeader) -> BTreeMap<Slot, Value> {
         header
             .values
             .keys()
@@ -97,30 +104,28 @@ impl SessionStore {
         })
     }
 
-    pub(super) fn insert(&mut self, id: Id, stored: Stored, now: u64) {
+    pub(super) fn insert(&mut self, id: QueryId, stored: Stored, now: u64) {
         self.remove(&id);
         self.bytes += stored.record.bytes;
-        self.usage.insert(
+        self.entries.insert(
             id,
-            Usage {
+            Entry {
+                stored,
                 used: now,
-                bytes: stored.record.bytes,
                 verified: 0,
             },
         );
-        self.entries.insert(id, stored);
     }
 
-    pub(super) fn remove(&mut self, id: &Id) {
-        self.entries.remove(id);
-        if let Some(usage) = self.usage.remove(id) {
-            self.bytes -= usage.bytes;
+    pub(super) fn remove(&mut self, id: &QueryId) {
+        if let Some(entry) = self.entries.remove(id) {
+            self.bytes -= entry.stored.record.bytes;
         }
     }
 
-    pub(super) fn touch(&mut self, id: &Id, now: u64) {
-        if let Some(usage) = self.usage.get_mut(id) {
-            usage.used = now;
+    pub(super) fn touch(&mut self, id: &QueryId, now: u64) {
+        if let Some(entry) = self.entries.get_mut(id) {
+            entry.used = now;
         }
     }
 
@@ -137,17 +142,18 @@ impl SessionStore {
             return 0;
         }
         self.last_collection = now;
+        // Choose the oldest entries using a small list of IDs and timestamps.
         let mut ordered = self
-            .usage
+            .entries
             .iter()
-            .map(|(id, usage)| (*id, *usage))
+            .map(|(id, entry)| (*id, entry.used))
             .collect::<Vec<_>>();
-        ordered.sort_by_key(|(id, usage)| (usage.used, *id));
+        ordered.sort_by_key(|(id, used)| (*used, *id));
         let mut removed = 0;
-        for (id, usage) in ordered {
+        for (id, used) in ordered {
             if self.entries.len() > retention.max_entries
                 || self.bytes > retention.max_bytes
-                || now.saturating_sub(usage.used) > max_idle
+                || now.saturating_sub(used) > max_idle
             {
                 self.remove(&id);
                 removed += 1;
@@ -155,7 +161,6 @@ impl SessionStore {
         }
         if self.entries.len() < self.entries.capacity() / 4 {
             self.entries.shrink_to_fit();
-            self.usage.shrink_to_fit();
         }
         removed
     }

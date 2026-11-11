@@ -37,7 +37,7 @@ use self::{
     backend::Backend,
     cache::{Memo, Memos},
     frame::Frame,
-    record::Id,
+    record::QueryId,
     registry::Registry,
 };
 pub use self::{
@@ -443,7 +443,7 @@ struct Operation<'db, S: Services> {
     id: u64,
     database: &'db Database<S>,
     memos: Memos,
-    touched: Mutex<HashMap<Id, Arc<Memo>>>,
+    touched: Mutex<HashMap<QueryId, Arc<Memo>>>,
     statistics: Mutex<Statistics>,
     spare: AtomicUsize,
     now: u64,

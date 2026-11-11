@@ -12,7 +12,7 @@ use std::{
 };
 
 use super::{
-    record::{Address, Id, Record, RecordHeader, Slot},
+    record::{Address, QueryId, Record, RecordHeader, Slot},
     value::Value,
 };
 use crate::{Query, Result};
@@ -27,7 +27,7 @@ pub(crate) struct Memo {
     /// Keep the declaration's static name available to claims without cloning the replay address.
     pub(crate) query_name: &'static str,
     pub(crate) address: Address,
-    pub(crate) id: Id,
+    pub(crate) id: QueryId,
     pub(crate) state: Mutex<State>,
 }
 

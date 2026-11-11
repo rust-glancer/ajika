@@ -21,7 +21,7 @@ use ajika_storage::{Database as StorageDatabase, Options};
 
 use super::{
     cache::Memo,
-    record::{Address, Id, Record, RecordHeader, Slot},
+    record::{Address, QueryId, Record, RecordHeader, Slot, ValueId},
     value::{Codec, Value},
 };
 use crate::{Error, Lifetime, Result, Retention, Statistics, codec};
@@ -43,6 +43,8 @@ struct Stored {
 #[derive(Clone, Copy)]
 struct Usage {
     used: u64,
+    // Warm reads defer timestamp writes until collection.
+    used_dirty: bool,
     bytes: u64,
     // This proof belongs to the stored record, not a decoded working copy. Reopening starts
     // at zero; only a successful operation can establish validity for this database's inputs.
@@ -50,8 +52,46 @@ struct Usage {
 }
 
 enum Store {
-    Memory(Mutex<HashMap<Id, Stored>>),
+    Memory(Mutex<HashMap<QueryId, Stored>>),
     Disk(StorageDatabase),
+}
+
+/// Keep the replacements together with the disk changes that must succeed before publication.
+struct PreparedCheckpoint {
+    queries: Vec<PreparedQuery>,
+    disk: DiskChanges,
+}
+
+/// A complete replacement, ready to publish after the disk checkpoint succeeds.
+struct PreparedQuery {
+    memo: Arc<Memo>,
+    record: Arc<Record>,
+    destination: Destination,
+}
+
+enum Destination {
+    Operation,
+    Session {
+        values: BTreeMap<Slot, Value>,
+    },
+    Persistent {
+        // Disk payloads go through DiskChanges instead of retaining their Rust values.
+        memory_values: BTreeMap<Slot, Value>,
+    },
+}
+
+/// Disk mutations are decided before opening a writer. Payloads stay typed until their
+/// bounded encoding batch, so preparing a checkpoint does not encode every value at once.
+#[derive(Default)]
+struct DiskChanges {
+    records: Vec<MetadataWrite>,
+    removed_values: Vec<ValueId>,
+    payloads: Vec<PendingValue>,
+}
+
+struct MetadataWrite {
+    id: QueryId,
+    bytes: Vec<u8>,
 }
 
 /// The store of query results retained from completed operations.
@@ -69,7 +109,7 @@ pub(crate) struct Backend {
     session: Mutex<SessionStore>,
     store: Store,
     // Small retention inventory. Loading this does not populate the runtime's query memos.
-    usage: Mutex<HashMap<Id, Usage>>,
+    usage: Mutex<HashMap<QueryId, Usage>>,
     // Keep the first fault that needs repair until the next run has exclusive access.
     recovery: OnceLock<Error>,
     bytes: AtomicU64,
@@ -141,8 +181,8 @@ impl Backend {
     fn reuse_or_rebuild_usage(
         database: &mut StorageDatabase,
         interner: &crate::Interner,
-        loaded: Result<HashMap<Id, Usage>>,
-    ) -> Result<HashMap<Id, Usage>> {
+        loaded: Result<HashMap<QueryId, Usage>>,
+    ) -> Result<HashMap<QueryId, Usage>> {
         match loaded {
             Err(error) if error.is_invalid_cache() => {
                 Self::rebuild_corrupt_cache(database, Some(interner), &error)
@@ -155,7 +195,7 @@ impl Backend {
         database: &mut StorageDatabase,
         interner: Option<&crate::Interner>,
         error: &Error,
-    ) -> Result<HashMap<Id, Usage>> {
+    ) -> Result<HashMap<QueryId, Usage>> {
         match interner {
             Some(interner) => interner.rebuild(database)?,
             None => database.rebuild(&[])?,
@@ -170,7 +210,7 @@ impl Backend {
         Ok(HashMap::new())
     }
 
-    fn load_usage(database: &StorageDatabase) -> Result<HashMap<Id, Usage>> {
+    fn load_usage(database: &StorageDatabase) -> Result<HashMap<QueryId, Usage>> {
         let mut usage = HashMap::new();
         // Restart needs sizes and last-use times to enforce retention. Decode each record
         // only long enough to extract those fields; dependency lists are not retained here,
@@ -178,9 +218,10 @@ impl Backend {
         for (id, bytes) in database.snapshot()?.records()? {
             let record: Record = codec::decode(&bytes)?;
             usage.insert(
-                id,
+                QueryId(id),
                 Usage {
                     used: record.last_used,
+                    used_dirty: false,
                     bytes: record.bytes,
                     verified: 0,
                 },
@@ -218,7 +259,7 @@ impl Backend {
         Ok(())
     }
 
-    fn replace_usage(&mut self, usage: HashMap<Id, Usage>) {
+    fn replace_usage(&mut self, usage: HashMap<QueryId, Usage>) {
         // A session record can point to a payload stored in a durable pack. Recovery may
         // restore an older checkpoint with different packs and records, so clear the
         // session cache. Saved queries will be validated against the installed inputs.
@@ -276,7 +317,7 @@ impl Backend {
     /// Load only the output metadata into a known-valid call's working memo. Disk storage
     /// still reads the complete metadata row, but decoding stops before dependency addresses.
     /// This keeps one stored record without allocating a dependency graph just to load a value.
-    pub(crate) fn header(&self, id: &Id) -> Result<(Option<Arc<RecordHeader>>, bool)> {
+    pub(crate) fn header(&self, id: &QueryId) -> Result<(Option<Arc<RecordHeader>>, bool)> {
         self.check()?;
         if let Some(record) = self.session.lock().expect("session storage").record(id) {
             return Ok((Some(record.header.clone()), false));
@@ -294,7 +335,7 @@ impl Backend {
                 Ok((
                     database
                         .snapshot()?
-                        .metadata(id)?
+                        .metadata(&id.0)?
                         .map(|bytes| codec::decode_prefix(&bytes))
                         .transpose()?,
                     true,
@@ -307,7 +348,7 @@ impl Backend {
     /// No payload is loaded and no validity is assumed. The evaluator uses this record to
     /// check reuse or compare a new execution with the old one. A new or collected key is absent.
     /// The flag reports a disk read, including a miss, for the operation's I/O counters.
-    pub(crate) fn record(&self, id: &Id) -> Result<(Option<Arc<Record>>, bool)> {
+    pub(crate) fn record(&self, id: &QueryId) -> Result<(Option<Arc<Record>>, bool)> {
         self.check()?;
         if let Some(record) = self.session.lock().expect("session storage").record(id) {
             return Ok((Some(record), false));
@@ -315,7 +356,7 @@ impl Backend {
         Ok((self.durable_record(id)?, self.is_disk()))
     }
 
-    fn durable_record(&self, id: &Id) -> Result<Option<Arc<Record>>> {
+    fn durable_record(&self, id: &QueryId) -> Result<Option<Arc<Record>>> {
         match &self.store {
             Store::Memory(store) => Ok(store
                 .lock()
@@ -325,7 +366,7 @@ impl Backend {
             Store::Disk(database) => self.observe((|| {
                 database
                     .snapshot()?
-                    .metadata(id)?
+                    .metadata(&id.0)?
                     .map(|bytes| codec::decode(&bytes).map(Arc::new))
                     .transpose()
             })()),
@@ -378,7 +419,7 @@ impl Backend {
                 let bytes = self.observe(
                     database
                         .snapshot()
-                        .and_then(|read| read.read_value(&address.value_id(slot), length))
+                        .and_then(|read| read.read_value(&address.value_id(slot).0, length))
                         .map_err(Error::from),
                 )?;
                 check()?;
@@ -397,7 +438,7 @@ impl Backend {
 
     /// Recover the last validation revision without retaining a decoded query record.
     /// A session override hides the durable record's proof, even before it has been validated.
-    pub(crate) fn verified(&self, id: &Id) -> u64 {
+    pub(crate) fn verified(&self, id: &QueryId) -> u64 {
         if let Some(revision) = self.session.lock().expect("session storage").verified(id) {
             return revision;
         }
@@ -439,10 +480,13 @@ impl Backend {
 
     /// Refresh a saved result's retention age without writing to disk on every query read.
     /// If this key has never been saved, checkpointing will add its usage entry when it is retained.
-    pub(crate) fn touch(&self, id: &Id, now: u64) {
+    pub(crate) fn touch(&self, id: &QueryId, now: u64) {
         self.session.lock().expect("session storage").touch(id, now);
-        if let Some(usage) = self.usage.lock().expect("storage usage").get_mut(id) {
+        if let Some(usage) = self.usage.lock().expect("storage usage").get_mut(id)
+            && usage.used != now
+        {
             usage.used = now;
+            usage.used_dirty = true;
         }
     }
 
@@ -493,14 +537,25 @@ impl Backend {
         }
         let _span = tracing::debug_span!("ajika.checkpoint", queries = dirty.len()).entered();
 
-        // First prepare complete replacements. Session overrides do not modify their durable
-        // baseline. In particular, an omitted output must hide an old slot without deleting it.
-        let mut sessions = Vec::new();
-        let mut durable = Vec::new();
-        let mut operations = Vec::new();
-        for memo in dirty {
+        let prepared = self.prepare_checkpoint(&dirty, now, check)?;
+        self.write_checkpoint(&prepared.disk, parallelism, stats, check)?;
+        self.publish_checkpoint(prepared, now);
+        Ok(())
+    }
+
+    /// Prepare the final record and retained values for every query, together with any disk
+    /// mutations. Nothing is published yet: a later preparation or write can still fail.
+    fn prepare_checkpoint(
+        &self,
+        dirty: &[&Arc<Memo>],
+        now: u64,
+        check: &dyn Fn() -> Result<()>,
+    ) -> Result<PreparedCheckpoint> {
+        let mut prepared = Vec::with_capacity(dirty.len());
+        let mut disk = DiskChanges::default();
+        for &memo in dirty {
             check()?;
-            let (mut record, values) = {
+            let (mut record, mut retained) = {
                 let state = memo.lock();
                 (
                     state
@@ -512,50 +567,65 @@ impl Backend {
                 )
             };
             record.last_used = now;
-            if record.header.lifetime == Lifetime::Operation {
-                operations.push((memo.clone(), Arc::new(record)));
-                continue;
+            // A save can promote a session answer without executing its provider again.
+            // Include retained session values, then let this operation's values take precedence.
+            if record.header.lifetime != Lifetime::Operation {
+                let mut session_values = self
+                    .session
+                    .lock()
+                    .expect("session storage")
+                    .values(&memo.id, &record.header);
+                session_values.extend(retained);
+                retained = session_values;
             }
-            let mut retained = self
-                .session
-                .lock()
-                .expect("session storage")
-                .values(&memo.id, &record.header);
-            retained.extend(values);
-            let original = self.durable_record(&memo.id)?;
-            if record.header.lifetime == Lifetime::Session {
-                let stored =
-                    SessionStore::prepare(record, retained, original.as_deref(), self.is_disk())?;
-                sessions.push((memo.clone(), stored));
-            } else {
-                durable.push((memo.clone(), record, original, retained));
-            }
-        }
-
-        // Dirty-only operations never open a disk writer. A save can promote a session value
-        // directly: its typed value is already in retained, even if validation did not decode it.
-        let result: Result<()> = (|| {
-            let mut write = match &self.store {
-                Store::Disk(database) if !durable.is_empty() => Some(database.begin_write()?),
-                _ => None,
-            };
-            let assignments = write
-                .as_ref()
-                .map(|write| self.interner.write_pending(write))
-                .transpose()?
-                .unwrap_or_default();
-            let mut completed = Vec::new();
-            let mut pending = Vec::new();
-            for (memo, mut record, original, values) in durable {
-                check()?;
-                if let Some(write) = &mut write {
+            let (record, destination) = match (record.header.lifetime, &self.store) {
+                (Lifetime::Operation, _) => (Arc::new(record), Destination::Operation),
+                (Lifetime::Session, _) => {
+                    // A session replacement hides removed outputs without changing their durable
+                    // baseline. Equal payloads can continue using that baseline's backing.
+                    let original = self.durable_record(&memo.id)?;
+                    let stored = SessionStore::prepare(
+                        record,
+                        retained,
+                        original.as_deref(),
+                        self.is_disk(),
+                    )?;
+                    (
+                        stored.record,
+                        Destination::Session {
+                            values: stored.values,
+                        },
+                    )
+                }
+                (Lifetime::Persistent, Store::Memory(store)) => {
+                    // Keep the complete typed replacement, including unloaded values from
+                    // the old entry. Memory storage does not charge encoded disk bytes.
+                    record.bytes = 0;
+                    let mut memory_values = store
+                        .lock()
+                        .expect("memory storage")
+                        .get(&memo.id)
+                        .map(|old| old.values.clone())
+                        .unwrap_or_default();
+                    memory_values.retain(|slot, _| record.header.values.contains_key(slot));
+                    memory_values.extend(
+                        retained
+                            .into_iter()
+                            .filter(|(_, value)| value.codec.is_some()),
+                    );
+                    (Arc::new(record), Destination::Persistent { memory_values })
+                }
+                (Lifetime::Persistent, Store::Disk(_)) => {
+                    let original = self.durable_record(&memo.id)?;
                     if let Some(previous) = &original {
                         for (slot, value) in &previous.header.values {
                             if !record.header.values.contains_key(slot) && value.length.is_some() {
-                                write.remove_value(&record.address.value_id(slot))?;
+                                disk.removed_values.push(record.address.value_id(slot));
                             }
                         }
                     }
+                    // Preserve an equal payload's disk location. Measure only values that
+                    // need writing, so the record already describes the resulting checkpoint.
                     for (slot, output) in &mut Arc::make_mut(&mut record.header).values {
                         let backing = original
                             .as_ref()
@@ -568,12 +638,12 @@ impl Backend {
                             continue;
                         }
                         output.length = None;
-                        if let Some(value) = values.get(slot)
+                        if let Some(value) = retained.get(slot)
                             && let Some(codec) = value.codec
                         {
                             let length = (codec.size)(&value.data)?;
                             output.length = Some(length);
-                            pending.push(PendingValue {
+                            disk.payloads.push(PendingValue {
                                 id: record.address.value_id(slot),
                                 value: value.clone(),
                                 length,
@@ -587,91 +657,124 @@ impl Backend {
                         .filter_map(|value| value.length)
                         .sum::<u64>()
                         + codec::encoded_size(&record)?;
-                    let bytes = codec::encode(&record)?;
-                    stats.metadata_writes += 1;
-                    stats.metadata_bytes_written += bytes.len() as u64;
-                    write.set_metadata(&memo.id, &bytes)?;
-                } else {
-                    // A promoted session record carries an encoded-size estimate. Typed memory
-                    // storage uses only entry and age limits, so leave that estimate behind.
-                    record.bytes = 0;
+                    disk.records.push(MetadataWrite {
+                        id: memo.id,
+                        bytes: codec::encode(&record)?,
+                    });
+                    (
+                        Arc::new(record),
+                        Destination::Persistent {
+                            memory_values: BTreeMap::new(),
+                        },
+                    )
                 }
-                completed.push((memo, Arc::new(record), values));
-            }
-            if let Some(write) = &mut write {
-                let Store::Disk(database) = &self.store else {
-                    unreachable!()
-                };
+            };
+            prepared.push(PreparedQuery {
+                memo: memo.clone(),
+                record,
+                destination,
+            });
+        }
+        Ok(PreparedCheckpoint {
+            queries: prepared,
+            disk,
+        })
+    }
+
+    /// Apply all prepared disk changes in one transaction. Session-only and operation-only
+    /// work never opens a writer. A failed write leaves every prepared replacement unpublished.
+    fn write_checkpoint(
+        &self,
+        disk: &DiskChanges,
+        parallelism: usize,
+        stats: &mut Statistics,
+        check: &dyn Fn() -> Result<()>,
+    ) -> Result<()> {
+        let written: Result<()> = (|| {
+            check()?;
+            if let Store::Disk(database) = &self.store
+                && !disk.records.is_empty()
+            {
+                let mut write = database.begin_write()?;
+                let assignments = self.interner.write_pending(&write)?;
+                for id in &disk.removed_values {
+                    check()?;
+                    write.remove_value(&id.0)?;
+                }
+                for record in &disk.records {
+                    check()?;
+                    stats.metadata_writes += 1;
+                    stats.metadata_bytes_written += record.bytes.len() as u64;
+                    write.set_metadata(&record.id.0, &record.bytes)?;
+                }
                 stats.bytes_written += PendingValue::write_all(
-                    &pending,
-                    write,
+                    &disk.payloads,
+                    &mut write,
                     database.compression(),
                     parallelism,
                     check,
                 )?;
-            }
-            check()?;
-            if let Some(write) = write {
+                check()?;
                 write.commit()?;
                 self.interner.checkpointed(assignments);
             }
+            Ok(())
+        })();
+        self.observe(written)
+    }
 
-            // Publish only after the whole checkpoint succeeds. Failed operations can discard
-            // their working memos and still recover the previous accepted session and disk state.
-            let mut usage = self.usage.lock().expect("storage usage");
-            let mut session = self.session.lock().expect("session storage");
-            for (memo, record, values) in completed {
-                if let Store::Memory(store) = &self.store {
-                    let mut store = store.lock().expect("memory storage");
-                    let mut retained = store
-                        .get(&memo.id)
-                        .map(|old| old.values.clone())
-                        .unwrap_or_default();
-                    retained.retain(|slot, _| record.header.values.contains_key(slot));
-                    retained.extend(
-                        values
-                            .into_iter()
-                            .filter(|(_, value)| value.codec.is_some()),
-                    );
-                    store.insert(
+    /// Publish the prepared records and values. All backing decisions are finished, and no
+    /// fallible I/O or serialization remains. Each memo sees the same record as its backend.
+    fn publish_checkpoint(&self, prepared: PreparedCheckpoint, now: u64) {
+        let mut usage = self.usage.lock().expect("storage usage");
+        let mut session = self.session.lock().expect("session storage");
+        for PreparedQuery {
+            memo,
+            record,
+            destination,
+        } in prepared.queries
+        {
+            match destination {
+                Destination::Operation => {}
+                Destination::Session { values } => {
+                    session.insert(
                         memo.id,
                         Stored {
                             record: record.clone(),
-                            values: retained,
+                            values,
                         },
+                        now,
                     );
                 }
-                session.remove(&memo.id);
-                let old = usage.insert(
-                    memo.id,
-                    Usage {
-                        used: now,
-                        bytes: record.bytes,
-                        verified: 0,
-                    },
-                );
-                self.bytes
-                    .fetch_sub(old.map_or(0, |item| item.bytes), Ordering::Relaxed);
-                self.bytes.fetch_add(record.bytes, Ordering::Relaxed);
-                let mut state = memo.lock();
-                state.install_record(record);
-                state.dirty = false;
+                Destination::Persistent { memory_values } => {
+                    if let Store::Memory(store) = &self.store {
+                        store.lock().expect("memory storage").insert(
+                            memo.id,
+                            Stored {
+                                record: record.clone(),
+                                values: memory_values,
+                            },
+                        );
+                    }
+                    session.remove(&memo.id);
+                    let old = usage.insert(
+                        memo.id,
+                        Usage {
+                            used: now,
+                            used_dirty: false,
+                            bytes: record.bytes,
+                            verified: 0,
+                        },
+                    );
+                    self.bytes
+                        .fetch_sub(old.map_or(0, |item| item.bytes), Ordering::Relaxed);
+                    self.bytes.fetch_add(record.bytes, Ordering::Relaxed);
+                }
             }
-            for (memo, stored) in sessions {
-                let record = stored.record.clone();
-                session.insert(memo.id, stored, now);
-                let mut state = memo.lock();
-                state.install_record(record);
-                state.dirty = false;
-            }
-            for (memo, record) in operations {
-                let mut state = memo.lock();
-                state.install_record(record);
-                state.dirty = false;
-            }
-            Ok(())
-        })();
-        self.observe(result)
+            let mut state = memo.lock();
+            state.install_record(record);
+            state.dirty = false;
+        }
     }
 
     pub(crate) fn session_usage(&self) -> (u64, u64) {
@@ -726,6 +829,9 @@ impl Backend {
                 bytes -= item.bytes;
             }
         }
+        // The inventory still decides eviction across all queries, but unchanged survivors
+        // need no record reads or writes. Keep only the queries with storage work to do.
+        ordered.retain(|(id, item)| removed.contains(id) || item.used_dirty);
         let result: Result<()> = (|| {
             match &self.store {
                 Store::Memory(store) => {
@@ -736,50 +842,46 @@ impl Backend {
                     }
                 }
                 Store::Disk(database) => {
-                    // Batch access-age bookkeeping with collection, rather than issuing
-                    // a durable write after every warm read-only request.
-                    // Read scopes pin their packs. Gather the small records first, then release
-                    // the read guard before acquiring the exclusive storage writer.
-                    let records = {
-                        let read = database.snapshot()?;
-                        ordered
-                            .iter()
-                            .map(|(id, item)| Ok((*id, *item, read.metadata(id)?)))
-                            .collect::<Result<Vec<_>>>()?
-                    };
-                    let mut write = database.begin_write()?;
-                    for (id, item, bytes) in &records {
-                        let Some(bytes) = bytes else {
-                            continue;
-                        };
-                        let mut record: Record = codec::decode(bytes)?;
-                        if removed.contains(id) {
-                            for (slot, value) in &record.header.values {
-                                if value.length.is_some() {
-                                    write.remove_value(&record.address.value_id(slot))?;
+                    if !ordered.is_empty() {
+                        let mut write = database.begin_write()?;
+                        // Read through the writer so each encoded record can be released before
+                        // loading the next. A separate snapshot would prevent exclusive writes.
+                        for (id, item) in &ordered {
+                            let Some(bytes) = write.metadata(&id.0)? else {
+                                continue;
+                            };
+                            let mut record: Record = codec::decode(&bytes)?;
+                            if removed.contains(id) {
+                                for (slot, value) in &record.header.values {
+                                    if value.length.is_some() {
+                                        write.remove_value(&record.address.value_id(slot).0)?;
+                                    }
                                 }
+                                write.remove_metadata(&id.0)?;
+                            } else {
+                                record.last_used = item.used;
+                                write.set_metadata(&id.0, &codec::encode(&record)?)?;
                             }
-                            write.remove_metadata(id)?;
-                        } else if record.last_used != item.used {
-                            record.last_used = item.used;
-                            write.set_metadata(id, &codec::encode(&record)?)?;
                         }
+                        write.commit()?;
                     }
-                    write.commit()?;
                 }
             }
             Ok(())
         })();
         self.observe(result)?;
-        // Stored removals succeeded. A failed pass must not advance this bookkeeping as if
-        // its removals had been saved, so update the in-memory inventory only afterward.
+        // Removals and timestamp updates succeeded. A failed pass must keep dirty timestamps
+        // for retry and must not forget records whose removal was rolled back.
         {
             let mut session = self.session.lock().expect("session storage");
             for id in &removed {
                 session.remove(id);
             }
         }
-        usage.retain(|id, _| !removed.contains(id));
+        usage.retain(|id, item| {
+            item.used_dirty = false;
+            !removed.contains(id)
+        });
         if usage.len() < usage.capacity() / 4 {
             usage.shrink_to_fit();
         }

@@ -11,9 +11,13 @@ use wincode::{SchemaRead, SchemaWrite};
 
 use crate::{Durability, Lifetime, Persist, Result, Stamp, codec};
 
-/// Fixed-size storage key derived from a query address or output slot. It identifies where
-/// an answer belongs, so replacing the answer reuses the same storage key.
-pub(crate) type Id = [u8; 32];
+/// Identifies one query call across recomputations. Its metadata uses this key in storage.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash)]
+pub(crate) struct QueryId(pub(crate) [u8; 32]);
+
+/// Identifies one output's payload. Replacing its value reuses the same storage key.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
+pub(crate) struct ValueId(pub(crate) [u8; 32]);
 
 /// Identifies an answer that consumers may continue to treat as equal.
 /// If a child recomputes to the same value, it keeps this token and its parents can reuse their
@@ -47,29 +51,31 @@ impl Address {
         })
     }
 
-    /// Find the storage key for this call's metadata and ordinary return value. Hash the call's
+    /// Find the storage key for this call's metadata. Hash the call's
     /// identity, not its answer, so recomputation replaces the existing record rather than
     /// accumulating a separate historical entry for every result.
-    pub(crate) fn id(&self) -> Id {
+    pub(crate) fn id(&self) -> QueryId {
         let mut hash = blake3::Hasher::new();
         hash.update(&(self.family.len() as u64).to_le_bytes());
         hash.update(self.family.as_bytes());
         hash.update(&self.key);
-        *hash.finalize().as_bytes()
+        QueryId(*hash.finalize().as_bytes())
     }
 
     /// Give each emitted value its own block address. All slots still belong to this query call,
     /// but storage can read or replace one payload without reading or replacing its siblings.
-    pub(crate) fn value_id(&self, slot: &Slot) -> Id {
+    pub(crate) fn value_id(&self, slot: &Slot) -> ValueId {
         let id = self.id();
         match slot {
-            None => id,
+            // Metadata and payloads have separate storage tables, so the ordinary return
+            // value can reuse the call's bytes while keeping a distinct identity type.
+            None => ValueId(id.0),
             Some(slot) => {
                 let mut hash = blake3::Hasher::new();
-                hash.update(&id);
+                hash.update(&id.0);
                 hash.update(b"output");
                 hash.update(slot);
-                *hash.finalize().as_bytes()
+                ValueId(*hash.finalize().as_bytes())
             }
         }
     }
