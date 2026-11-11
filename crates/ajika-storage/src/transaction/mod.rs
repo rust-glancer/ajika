@@ -136,6 +136,12 @@ impl<'a> Write<'a> {
         Ok(())
     }
 
+    /// Read metadata from this checkpoint, including any pending changes.
+    pub fn metadata(&self, id: &Id) -> Result<Option<Vec<u8>>> {
+        let table = self.transaction.open_table(RECORDS)?;
+        Ok(table.get(id)?.map(|bytes| bytes.value().to_vec()))
+    }
+
     pub fn set_metadata(&self, id: &Id, bytes: &[u8]) -> Result<()> {
         self.transaction.open_table(RECORDS)?.insert(id, bytes)?;
         Ok(())

@@ -43,6 +43,8 @@ struct Stored {
 #[derive(Clone, Copy)]
 struct Usage {
     used: u64,
+    // Warm reads defer timestamp writes until collection. Session entries leave this false.
+    used_dirty: bool,
     bytes: u64,
     // This proof belongs to the stored record, not a decoded working copy. Reopening starts
     // at zero; only a successful operation can establish validity for this database's inputs.
@@ -219,6 +221,7 @@ impl Backend {
                 QueryId(id),
                 Usage {
                     used: record.last_used,
+                    used_dirty: false,
                     bytes: record.bytes,
                     verified: 0,
                 },
@@ -479,8 +482,11 @@ impl Backend {
     /// If this key has never been saved, checkpointing will add its usage entry when it is retained.
     pub(crate) fn touch(&self, id: &QueryId, now: u64) {
         self.session.lock().expect("session storage").touch(id, now);
-        if let Some(usage) = self.usage.lock().expect("storage usage").get_mut(id) {
+        if let Some(usage) = self.usage.lock().expect("storage usage").get_mut(id)
+            && usage.used != now
+        {
             usage.used = now;
+            usage.used_dirty = true;
         }
     }
 
@@ -755,6 +761,7 @@ impl Backend {
                         memo.id,
                         Usage {
                             used: now,
+                            used_dirty: false,
                             bytes: record.bytes,
                             verified: 0,
                         },
@@ -822,6 +829,9 @@ impl Backend {
                 bytes -= item.bytes;
             }
         }
+        // The inventory still decides eviction across all queries, but unchanged survivors
+        // need no record reads or writes. Keep only the queries with storage work to do.
+        ordered.retain(|(id, item)| removed.contains(id) || item.used_dirty);
         let result: Result<()> = (|| {
             match &self.store {
                 Store::Memory(store) => {
@@ -832,50 +842,46 @@ impl Backend {
                     }
                 }
                 Store::Disk(database) => {
-                    // Batch access-age bookkeeping with collection, rather than issuing
-                    // a durable write after every warm read-only request.
-                    // Read scopes pin their packs. Gather the small records first, then release
-                    // the read guard before acquiring the exclusive storage writer.
-                    let records = {
-                        let read = database.snapshot()?;
-                        ordered
-                            .iter()
-                            .map(|(id, item)| Ok((*id, *item, read.metadata(&id.0)?)))
-                            .collect::<Result<Vec<_>>>()?
-                    };
-                    let mut write = database.begin_write()?;
-                    for (id, item, bytes) in &records {
-                        let Some(bytes) = bytes else {
-                            continue;
-                        };
-                        let mut record: Record = codec::decode(bytes)?;
-                        if removed.contains(id) {
-                            for (slot, value) in &record.header.values {
-                                if value.length.is_some() {
-                                    write.remove_value(&record.address.value_id(slot).0)?;
+                    if !ordered.is_empty() {
+                        let mut write = database.begin_write()?;
+                        // Read through the writer so each encoded record can be released before
+                        // loading the next. A separate snapshot would prevent exclusive writes.
+                        for (id, item) in &ordered {
+                            let Some(bytes) = write.metadata(&id.0)? else {
+                                continue;
+                            };
+                            let mut record: Record = codec::decode(&bytes)?;
+                            if removed.contains(id) {
+                                for (slot, value) in &record.header.values {
+                                    if value.length.is_some() {
+                                        write.remove_value(&record.address.value_id(slot).0)?;
+                                    }
                                 }
+                                write.remove_metadata(&id.0)?;
+                            } else {
+                                record.last_used = item.used;
+                                write.set_metadata(&id.0, &codec::encode(&record)?)?;
                             }
-                            write.remove_metadata(&id.0)?;
-                        } else if record.last_used != item.used {
-                            record.last_used = item.used;
-                            write.set_metadata(&id.0, &codec::encode(&record)?)?;
                         }
+                        write.commit()?;
                     }
-                    write.commit()?;
                 }
             }
             Ok(())
         })();
         self.observe(result)?;
-        // Stored removals succeeded. A failed pass must not advance this bookkeeping as if
-        // its removals had been saved, so update the in-memory inventory only afterward.
+        // Removals and timestamp updates succeeded. A failed pass must keep dirty timestamps
+        // for retry and must not forget records whose removal was rolled back.
         {
             let mut session = self.session.lock().expect("session storage");
             for id in &removed {
                 session.remove(id);
             }
         }
-        usage.retain(|id, _| !removed.contains(id));
+        usage.retain(|id, item| {
+            item.used_dirty = false;
+            !removed.contains(id)
+        });
         if usage.len() < usage.capacity() / 4 {
             usage.shrink_to_fit();
         }

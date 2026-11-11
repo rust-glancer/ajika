@@ -104,6 +104,7 @@ impl SessionStore {
             id,
             Usage {
                 used: now,
+                used_dirty: false,
                 bytes: stored.record.bytes,
                 verified: 0,
             },
