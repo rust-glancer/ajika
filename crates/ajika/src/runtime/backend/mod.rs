@@ -80,8 +80,8 @@ enum Destination {
     },
 }
 
-/// Disk mutations are decided before opening a writer. Payloads stay typed until their
-/// bounded encoding batch, so preparing a checkpoint does not encode every value at once.
+/// Disk mutations are decided before opening a writer. Records and payloads stay typed until
+/// writing, so preparation does not duplicate the whole dependency graph as encoded bytes.
 #[derive(Default)]
 struct DiskChanges {
     records: Vec<MetadataWrite>,
@@ -91,7 +91,7 @@ struct DiskChanges {
 
 struct MetadataWrite {
     id: QueryId,
-    bytes: Vec<u8>,
+    record: Arc<Record>,
 }
 
 /// The store of query results retained from completed operations.
@@ -657,12 +657,13 @@ impl Backend {
                         .filter_map(|value| value.length)
                         .sum::<u64>()
                         + codec::encoded_size(&record)?;
+                    let record = Arc::new(record);
                     disk.records.push(MetadataWrite {
                         id: memo.id,
-                        bytes: codec::encode(&record)?,
+                        record: record.clone(),
                     });
                     (
-                        Arc::new(record),
+                        record,
                         Destination::Persistent {
                             memory_values: BTreeMap::new(),
                         },
@@ -703,9 +704,13 @@ impl Backend {
                 }
                 for record in &disk.records {
                     check()?;
+                    // Release each encoded record after the writer copies it. Retaining the
+                    // whole batch would keep a second copy of the dependency graph alive while
+                    // payloads are encoded. Publication still waits for the transaction to commit.
+                    let bytes = codec::encode(record.record.as_ref())?;
                     stats.metadata_writes += 1;
-                    stats.metadata_bytes_written += record.bytes.len() as u64;
-                    write.set_metadata(&record.id.0, &record.bytes)?;
+                    stats.metadata_bytes_written += bytes.len() as u64;
+                    write.set_metadata(&record.id.0, &bytes)?;
                 }
                 stats.bytes_written += PendingValue::write_all(
                     &disk.payloads,
