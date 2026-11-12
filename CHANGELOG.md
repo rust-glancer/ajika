@@ -1,5 +1,12 @@
 # Changelog
 
+## [0.1.7](https://github.com/rust-glancer/ajika/compare/v0.1.6...v0.1.7) (2026-11-12)
+
+
+### Bug Fixes
+
+* Do not store encoded values in memory for no reason ([#22](https://github.com/rust-glancer/ajika/issues/22)) ([412b72e](https://github.com/rust-glancer/ajika/commit/412b72edae0dc3fb6b80ceb78db6ee3f55c10f97))
+
 ## [0.1.6](https://github.com/rust-glancer/ajika/compare/v0.1.5...v0.1.6) (2026-11-11)
 
 
