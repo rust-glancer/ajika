@@ -42,7 +42,7 @@ jobs:
       - name: Install cargo-codspeed
         uses: taiki-e/install-action@16b05812d776ae1dfaabc8277e421fb6d2506419 # v2.82.7
         with:
-          tool: cargo-codspeed@4.7.0
+          tool: cargo-codspeed@6.0.0
       - name: Build benchmarks
         run: cargo codspeed build --measurement-mode simulation,memory -p ${{ matrix.package }} --bench ${{ matrix.bench }} --locked
       - name: Run benchmarks
