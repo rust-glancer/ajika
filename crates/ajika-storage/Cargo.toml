@@ -9,7 +9,7 @@ description = "Atomic records and packed immutable values for Ajika."
 
 [dependencies]
 thiserror.workspace = true
-blake3.workspace = true
+crc32c.workspace = true
 getrandom.workspace = true
 lz4_flex = { workspace = true, features = ["std", "frame"] }
 redb.workspace = true
@@ -19,6 +19,7 @@ zstd.workspace = true
 
 [dev-dependencies]
 anyhow.workspace = true
+blake3.workspace = true
 divan.workspace = true
 tempfile.workspace = true
 
