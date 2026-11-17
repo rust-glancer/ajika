@@ -363,7 +363,7 @@ impl<'a> Read<'a> {
                 let mut bytes = vec![0; stored_length];
                 Self::read_exact_at(&file, &mut bytes, offset + FrameHeader::LENGTH)?;
                 ensure!(
-                    blake3::hash(&bytes).as_bytes() == &header.checksum,
+                    crc32c::crc32c(&bytes) == header.checksum,
                     Error::invalid_cache("invalid stored value checksum"),
                 );
                 header.compression.decode(bytes, length)

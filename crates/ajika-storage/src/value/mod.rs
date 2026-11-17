@@ -51,7 +51,7 @@ impl Compression {
         Ok(EncodedValue {
             raw_length,
             compression,
-            checksum: *blake3::hash(&encoded).as_bytes(),
+            checksum: crc32c::crc32c(&encoded),
             bytes: encoded,
         })
     }
@@ -99,7 +99,7 @@ impl Compression {
 pub struct EncodedValue {
     pub(crate) raw_length: u64,
     pub(crate) compression: Compression,
-    pub(crate) checksum: [u8; 32],
+    pub(crate) checksum: u32,
     pub(crate) bytes: Vec<u8>,
 }
 

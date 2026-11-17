@@ -12,7 +12,7 @@ use wincode::{SchemaRead, SchemaReadOwned, SchemaWrite, config::DefaultConfig};
 
 use crate::{Compression, Error, Id, Result};
 
-pub(crate) const FORMAT: &str = "ajika-packs-2";
+pub(crate) const FORMAT: &str = "ajika-packs-3";
 pub(crate) const HEADER: TableDefinition<&str, &[u8]> = TableDefinition::new("header");
 pub(crate) const RECORDS: TableDefinition<&Id, &[u8]> = TableDefinition::new("records");
 pub(crate) const IDENTITIES: TableDefinition<(&str, u32), &[u8]> =
@@ -74,12 +74,12 @@ pub(crate) struct FrameHeader {
     pub(crate) raw_length: u64,
     pub(crate) stored_length: u64,
     pub(crate) compression: Compression,
-    pub(crate) checksum: [u8; 32],
+    pub(crate) checksum: u32,
 }
 
 impl FrameHeader {
     // wincode stores the enum discriminant as a u32. The remaining fields have fixed widths.
-    pub(crate) const LENGTH: u64 = 32 + 8 + 8 + 4 + 32;
+    pub(crate) const LENGTH: u64 = 32 + 8 + 8 + 4 + 4;
 
     pub(crate) fn frame_length(&self) -> u64 {
         Self::LENGTH + self.stored_length

@@ -87,16 +87,16 @@ impl<'a> PackWriter<'a> {
         let location = self.begin_frame(header)?;
         let writer = &mut self.current.as_mut().expect("pack created").writer;
         let mut buffer = [0_u8; 64 * 1024];
-        let mut hash = blake3::Hasher::new();
+        let mut checksum = 0;
         while remaining > 0 {
             let length = remaining.min(buffer.len() as u64) as usize;
             source.read_exact(&mut buffer[..length])?;
-            hash.update(&buffer[..length]);
+            checksum = crc32c::crc32c_append(checksum, &buffer[..length]);
             writer.write_all(&buffer[..length])?;
             remaining -= length as u64;
         }
         ensure!(
-            hash.finalize().as_bytes() == &expected,
+            checksum == expected,
             Error::invalid_cache("invalid stored value checksum"),
         );
         self.failed = false;
