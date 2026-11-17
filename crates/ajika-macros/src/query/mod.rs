@@ -25,7 +25,7 @@ pub(crate) fn register(args: TokenStream, input: TokenStream) -> syn::Result<Tok
     let options = Options::parse(args, &[], syn::parse_quote!(::ajika))?;
     let implementation: syn::ItemImpl = syn::parse2(input)?;
     let gates = Attributes::prepare(&implementation.attrs)?.gates;
-    let Some((_, trait_path, _)) = &implementation.trait_ else {
+    let Some((trait_path, _)) = &implementation.trait_ else {
         return Err(syn::Error::new_spanned(
             &implementation,
             "register requires an Input or Query implementation",

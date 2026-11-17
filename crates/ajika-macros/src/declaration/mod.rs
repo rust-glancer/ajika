@@ -230,7 +230,7 @@ impl QuerySignature {
     pub(crate) fn check_signature(signature: &Signature) -> syn::Result<()> {
         if signature.asyncness.is_some()
             || signature.constness.is_some()
-            || signature.unsafety.is_some()
+            || !matches!(signature.safety, syn::Safety::Default)
             || signature.abi.is_some()
             || signature.variadic.is_some()
             || !signature.generics.params.is_empty()
