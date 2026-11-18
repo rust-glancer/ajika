@@ -25,6 +25,7 @@ dependencies = [
  "tempfile",
  "thiserror",
  "tracing",
+ "twox-hash",
  "wincode",
 ]
 

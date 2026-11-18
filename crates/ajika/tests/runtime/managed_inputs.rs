@@ -9,6 +9,18 @@ use super::test_options;
 
 type Db<'a> = ajika::Db<'a, ()>;
 
+#[test]
+fn precomputed_and_streamed_input_stamps_agree() -> Result<()> {
+    // The reference XXH3-128 digest of 512 'a' bytes followed by 'b'.
+    // A host can supply that digest directly or let Ajika hash the same bytes as fields.
+    let fields = ([b'a'; 512], b'b');
+    let digest = 0x4c6a_58dc_6751_e506_ed5b_3358_5517_b321_u128;
+    let expected = Stamp::from_bytes(digest.to_be_bytes());
+    assert_eq!(Stamp::of(&wincode::serialize(&fields)?), expected);
+    assert_eq!(Stamp::of_value(&fields)?, expected);
+    Ok(())
+}
+
 #[ajika::input(key = u32)]
 struct Package {
     /// The source text is independent of the language edition.

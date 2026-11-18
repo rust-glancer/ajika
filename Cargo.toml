@@ -47,6 +47,7 @@ syn = "3.0"
 tempfile = "3.27.0"
 thiserror = "2.0.21"
 tracing = "0.1.44"
+twox-hash = { version = "2.1.5", default-features = false }
 wincode = "0.6.3"
 zstd = { version = "0.14.4", default-features = false }
 

@@ -15,6 +15,7 @@ blake3.workspace = true
 getrandom.workspace = true
 inventory.workspace = true
 tracing.workspace = true
+twox-hash = { workspace = true, features = ["xxhash3_128"] }
 wincode = { workspace = true, features = ["derive"] }
 
 [dev-dependencies]
