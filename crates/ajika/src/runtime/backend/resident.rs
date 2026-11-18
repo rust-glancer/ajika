@@ -94,7 +94,7 @@ impl ResidentStore {
 
     pub(super) fn insert(&mut self, id: QueryId, stored: Stored, now: u64) {
         self.remove(&id);
-        self.bytes += stored.record.bytes;
+        self.bytes += stored.record.footer.bytes;
         self.entries.insert(
             id,
             Entry {
@@ -107,7 +107,7 @@ impl ResidentStore {
 
     pub(super) fn remove(&mut self, id: &QueryId) {
         if let Some(entry) = self.entries.remove(id) {
-            self.bytes -= entry.stored.record.bytes;
+            self.bytes -= entry.stored.record.footer.bytes;
         }
     }
 

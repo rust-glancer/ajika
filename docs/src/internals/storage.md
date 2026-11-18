@@ -105,9 +105,11 @@ Between operations, the disk backend keeps compact usage entries: call ID,
 last-use time, logical size, and verified revision. It does not retain every
 query's encoded key, dependency vector, output metadata, and mutex.
 
-On reopening, [`Backend::open`](https://github.com/rust-glancer/ajika/blob/main/crates/ajika/src/runtime/backend/mod.rs#L267) rebuilds that inventory from
-record metadata without decoding query payloads. Verified revisions begin at
-zero. Full records and headers are acquired into operation memos when needed.
+On reopening, the runtime visits one metadata row at a time. Its key identifies the
+query, and its last 16 bytes hold the last-use time and logical size. Those are enough
+to apply retention before the first query runs. Each verified revision starts at zero.
+The first request that needs the dependencies decodes the full record. If it finds
+damaged metadata, the usual cache recovery runs on the next request.
 
 The storage layer also keeps a small cache of open pack files to avoid reopening
 them for every read, and redb has its own page cache.

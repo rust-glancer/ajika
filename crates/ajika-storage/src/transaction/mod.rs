@@ -282,16 +282,29 @@ impl<'a> Read<'a> {
             .collect()
     }
 
-    /// Enumerate records without loading payloads. The caller interprets their contents.
+    /// Copy all metadata rows into an owned collection. Use [`visit_records`](Self::visit_records)
+    /// to inspect a large catalog one row at a time.
     pub fn records(&self) -> Result<Vec<(Id, Vec<u8>)>> {
-        self.transaction
-            .open_table(RECORDS)?
-            .iter()?
-            .map(|entry| {
-                let (key, value) = entry?;
-                Ok((*key.value(), value.value().to_vec()))
-            })
-            .collect()
+        let mut records = Vec::new();
+        self.visit_records(|id, bytes| -> Result<()> {
+            records.push((id, bytes.to_vec()));
+            Ok(())
+        })?;
+        Ok(records)
+    }
+
+    /// Visit each record's metadata while its index page is borrowed. An error from the
+    /// visitor stops the scan and lets the caller report a problem with its own record format.
+    pub fn visit_records<E: From<Error>>(
+        &self,
+        mut visit: impl FnMut(Id, &[u8]) -> std::result::Result<(), E>,
+    ) -> std::result::Result<(), E> {
+        let records = self.transaction.open_table(RECORDS).map_err(Error::from)?;
+        for row in records.iter().map_err(Error::from)? {
+            let (id, bytes) = row.map_err(Error::from)?;
+            visit(*id.value(), bytes.value())?;
+        }
+        Ok(())
     }
 
     pub fn metadata(&self, id: &Id) -> Result<Option<Vec<u8>>> {

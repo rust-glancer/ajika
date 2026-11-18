@@ -15,7 +15,7 @@ use crate::{Error, Result};
 // This is a local, versioned cache. A query must not acquire an arbitrary size limit merely
 // because one of its fields is a large Vec. Corrupted sequence lengths can still exhaust memory;
 // this codec is not intended for untrusted input.
-type Config = wincode::config::Configuration<true, { usize::MAX }>;
+pub(crate) type Config = wincode::config::Configuration<true, { usize::MAX }>;
 
 const CONFIG: Config = wincode::config::Configuration::default().disable_preallocation_size_limit();
 

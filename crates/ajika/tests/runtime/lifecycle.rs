@@ -291,8 +291,11 @@ fn replacing_large_payloads_reclaims_their_logical_storage() -> Result<()> {
     let old_bytes = db.statistics().stored_bytes;
     drop(db);
 
-    // Reopening must recover a large value from its independently stored payload.
+    // The reopened inventory must count the large payload even before anyone asks for it.
     let mut db = Database::open(&path, "test", inputs(&large), (), test_options())?;
+    db.run(|_| Ok(()))?;
+    assert_eq!(db.statistics().stored_queries, 1);
+    assert_eq!(db.statistics().stored_bytes, old_bytes);
     assert_eq!(db.run(|db| tree(db, 1))?.as_str(), format!("1:{large}"));
     assert_eq!(db.statistics().executed, 0);
     db.replace_inputs(inputs("small"));

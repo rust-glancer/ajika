@@ -12,7 +12,7 @@ use super::{
     cache::Memo,
     diagnostics,
     frame::Frame,
-    record::{Address, Dependency, Record, RecordHeader, Slot, ValueRecord},
+    record::{Address, Dependency, Record, RecordFooter, RecordHeader, Slot, ValueRecord},
     value::{Codec, Value},
 };
 use crate::{
@@ -666,8 +666,10 @@ impl<'db, S: Services> Db<'db, S> {
                 durability: reads.durability,
                 lifetime: reads.lifetime,
             }),
-            last_used: self.operation.now,
-            bytes: previous.map_or(0, |old| old.bytes),
+            footer: RecordFooter {
+                last_used: self.operation.now,
+                bytes: previous.map_or(0, |old| old.footer.bytes),
+            },
         });
         // Publish values, their versions, and the new reads together. Before this point an error
         // leaves no partial output set for a waiting query to observe.

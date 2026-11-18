@@ -21,7 +21,7 @@ use ajika_storage::Database as StorageDatabase;
 
 use super::{
     cache::Memo,
-    record::{QueryId, Record, RecordHeader, Slot, ValueId},
+    record::{QueryId, Record, RecordFooter, RecordHeader, Slot, ValueId},
     value::{Codec, Value},
 };
 use crate::{DatabaseOptions, Error, Lifetime, Result, Retention, Statistics, codec};
@@ -61,9 +61,10 @@ impl Stored {
             }
         }
         values.retain(|_, value| value.codec.is_some());
-        record.bytes = codec::encoded_size(&record)?;
+        record.footer.bytes = codec::encoded_size(&record)?;
         for value in values.values() {
-            record.bytes += (value.codec.expect("retained payload codec").size)(&value.data)?;
+            record.footer.bytes +=
+                (value.codec.expect("retained payload codec").size)(&value.data)?;
         }
         Ok(Self {
             record: Arc::new(record),
@@ -84,6 +85,13 @@ struct Usage {
     // This proof belongs to the stored record, not a decoded working copy. Reopening starts
     // at zero; only a successful operation can establish validity for this database's inputs.
     verified: u64,
+}
+
+/// Reconstructed from one disk snapshot when opening or repairing the cache.
+#[derive(Default)]
+struct DiskInventory {
+    entries: HashMap<QueryId, Usage>,
+    bytes: u64,
 }
 
 enum Store {
@@ -154,7 +162,7 @@ impl DiskChanges {
                 output.length = None;
             }
         }
-        record.bytes = record
+        record.footer.bytes = record
             .header
             .values
             .values()
@@ -222,7 +230,7 @@ impl Deferred {
             };
             bytes += length;
         }
-        record.bytes = bytes + codec::encoded_size(&record)?;
+        record.footer.bytes = bytes + codec::encoded_size(&record)?;
         Ok(Stored {
             record: Arc::new(record),
             values,
@@ -269,7 +277,7 @@ impl Backend {
         // adapter and the application's persisted query types.
         let mut database =
             StorageDatabase::open(path, &format!("query-runtime-4:{epoch}"), options.storage)?;
-        let (interner, usage) = match Self::load_interner(&mut database) {
+        let (interner, inventory) = match Self::load_interner(&mut database) {
             Ok(interner) => {
                 let loaded = Self::load_usage(&database);
                 let usage = Self::reuse_or_rebuild_usage(&mut database, &interner, loaded)?;
@@ -281,7 +289,6 @@ impl Backend {
             }
             Err(error) => return Err(error),
         };
-        let bytes = usage.values().map(|item| item.bytes).sum();
         Ok(Self {
             interner,
             store: Store::Disk(Box::new(database)),
@@ -290,9 +297,9 @@ impl Backend {
                 max_bytes,
             }),
             session: Mutex::default(),
-            usage: Mutex::new(usage),
+            usage: Mutex::new(inventory.entries),
             recovery: OnceLock::new(),
-            bytes: AtomicU64::new(bytes),
+            bytes: AtomicU64::new(inventory.bytes),
         })
     }
 
@@ -317,8 +324,8 @@ impl Backend {
     fn reuse_or_rebuild_usage(
         database: &mut StorageDatabase,
         interner: &crate::Interner,
-        loaded: Result<HashMap<QueryId, Usage>>,
-    ) -> Result<HashMap<QueryId, Usage>> {
+        loaded: Result<DiskInventory>,
+    ) -> Result<DiskInventory> {
         match loaded {
             Err(error) if error.is_invalid_cache() => {
                 Self::rebuild_corrupt_cache(database, Some(interner), &error)
@@ -331,7 +338,7 @@ impl Backend {
         database: &mut StorageDatabase,
         interner: Option<&crate::Interner>,
         error: &Error,
-    ) -> Result<HashMap<QueryId, Usage>> {
+    ) -> Result<DiskInventory> {
         match interner {
             Some(interner) => interner.rebuild(database)?,
             None => database.rebuild(&[])?,
@@ -343,27 +350,33 @@ impl Backend {
             identities_discarded = interner.is_none(),
             "discarded corrupt cache contents"
         );
-        Ok(HashMap::new())
+        Ok(DiskInventory::default())
     }
 
-    fn load_usage(database: &StorageDatabase) -> Result<HashMap<QueryId, Usage>> {
-        let mut usage = HashMap::new();
-        // Restart needs sizes and last-use times to enforce retention. Decode each record
-        // only long enough to extract those fields; dependency lists are not retained here,
-        // and query payloads are not loaded at all.
-        for (id, bytes) in database.snapshot()?.records()? {
-            let record: Record = codec::decode(&bytes)?;
-            usage.insert(
-                QueryId(id),
-                Usage {
-                    used: record.last_used,
-                    used_dirty: false,
-                    bytes: record.bytes,
-                    verified: 0,
-                },
-            );
-        }
-        Ok(usage)
+    fn load_usage(database: &StorageDatabase) -> Result<DiskInventory> {
+        let mut inventory = DiskInventory::default();
+        // Opening needs only the cost and age of each saved query. Its next request will
+        // decode the full record and validate its dependencies against the new inputs.
+        database
+            .snapshot()?
+            .visit_records(|id, row| -> Result<()> {
+                let footer = RecordFooter::from_record(row)?;
+                inventory.bytes = inventory
+                    .bytes
+                    .checked_add(footer.bytes)
+                    .ok_or_else(|| Error::invalid_cache("total stored query size overflowed"))?;
+                inventory.entries.insert(
+                    QueryId(id),
+                    Usage {
+                        used: footer.last_used,
+                        used_dirty: false,
+                        bytes: footer.bytes,
+                        verified: 0,
+                    },
+                );
+                Ok(())
+            })?;
+        Ok(inventory)
     }
 
     pub(crate) fn recovery_pending(&self) -> bool {
@@ -395,7 +408,7 @@ impl Backend {
         Ok(())
     }
 
-    fn replace_usage(&mut self, usage: HashMap<QueryId, Usage>) {
+    fn replace_usage(&mut self, inventory: DiskInventory) {
         // Both session and pending records can refer to outputs in the old disk cache.
         // After recovery or invalidation those references may point to missing or different
         // values. Start both maps empty and validate any recovered records on demand.
@@ -403,11 +416,8 @@ impl Backend {
         if let Some(mut pending) = self.pending() {
             pending.clear();
         }
-        self.bytes.store(
-            usage.values().map(|item| item.bytes).sum(),
-            Ordering::Relaxed,
-        );
-        *self.usage.get_mut().expect("storage usage") = usage;
+        self.bytes.store(inventory.bytes, Ordering::Relaxed);
+        *self.usage.get_mut().expect("storage usage") = inventory.entries;
     }
 
     /// A last-use time that can be saved and compared after restarting. Process-local
@@ -758,7 +768,7 @@ impl Backend {
                 (record, std::mem::take(&mut state.values))
             };
             let mut record = Arc::unwrap_or_clone(record);
-            record.last_used = now;
+            record.footer.last_used = now;
             // Saving the exact text that's open in an editor can change a query's lifetime
             // without running it again. Its memo may be missing values that now need to be
             // saved. Pick up the edited values before replacing the session entry.
@@ -776,7 +786,7 @@ impl Backend {
                 (Lifetime::Persistent, Store::Memory(store)) => {
                     // Keep the complete typed replacement, including unloaded values from
                     // the old entry. Memory storage does not charge encoded disk bytes.
-                    record.bytes = 0;
+                    record.footer.bytes = 0;
                     let mut memory_values = store
                         .lock()
                         .expect("memory storage")
@@ -880,7 +890,7 @@ impl Backend {
                 continue;
             }
 
-            let bytes = stored.record.bytes;
+            let bytes = stored.record.footer.bytes;
             if let Store::Memory(store) = &self.store {
                 store.lock().expect("memory storage").insert(id, stored);
             }
@@ -936,7 +946,7 @@ impl Backend {
                     None
                 };
                 let mut record = stored.record.as_ref().clone();
-                record.last_used = used;
+                record.footer.last_used = used;
                 disk.replace(id, record, &stored.values, original.as_ref())?;
             }
             Ok(())
@@ -957,15 +967,15 @@ impl Backend {
         let usage = self.usage.get_mut().expect("storage usage");
         for MetadataWrite { id, record } in disk.records {
             let replacement = Usage {
-                bytes: record.bytes,
-                used: record.last_used,
+                bytes: record.footer.bytes,
+                used: record.footer.last_used,
                 used_dirty: false,
                 verified: pending.verified(&id).expect("drained record is pending"),
             };
             let old = usage.insert(id, replacement);
             self.bytes
                 .fetch_sub(old.map_or(0, |item| item.bytes), Ordering::Relaxed);
-            self.bytes.fetch_add(record.bytes, Ordering::Relaxed);
+            self.bytes.fetch_add(record.footer.bytes, Ordering::Relaxed);
         }
         pending.clear();
         Ok(())
@@ -1021,7 +1031,7 @@ impl Backend {
                         .filter(|(slot, _)| !stored.values.contains_key(*slot))
                         .filter_map(|(_, output)| output.length)
                         .sum();
-                    ordered.push((id, used, stored.record.bytes + backed_bytes));
+                    ordered.push((id, used, stored.record.footer.bytes + backed_bytes));
                 }
             }
         }
@@ -1074,7 +1084,7 @@ impl Backend {
                                 }
                                 write.remove_metadata(&id.0)?;
                             } else {
-                                record.last_used = item.used;
+                                record.footer.last_used = item.used;
                                 write.set_metadata(&id.0, &codec::encode(&record)?)?;
                             }
                         }
@@ -1135,7 +1145,7 @@ impl Backend {
         };
         self.observe(result)?;
         self.recovery.take();
-        self.replace_usage(HashMap::new());
+        self.replace_usage(DiskInventory::default());
         Ok(())
     }
 
