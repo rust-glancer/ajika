@@ -1,6 +1,6 @@
 //! Shared query working state during one operation.
 //!
-//! An operation can ask for `words("lib.rs")` from several callers or workers. [`Memos`]
+//! An operation can ask for `words("lib.rs")` from several callers or workers. [`Operation::memo`]
 //! gives them one [`Memo`] so they share validation, computation and decoded values.
 //! The backend owns completed records between operations; these working objects do not
 //! keep their keys, output metadata or locks resident while the database is idle.
@@ -12,10 +12,11 @@ use std::{
 };
 
 use super::{
+    Operation,
     record::{Address, QueryId, Record, RecordHeader, Slot},
     value::Value,
 };
-use crate::{Query, Result};
+use crate::{Query, Result, Services, interner::FamilyId};
 
 /// One query call being used by the current operation, such as `words("lib.rs")`.
 ///
@@ -81,23 +82,25 @@ impl State {
     }
 }
 
-type Table<Q> = Mutex<HashMap<<Q as Query>::Key, Arc<Memo>>>;
+struct Table<Q: Query> {
+    family: FamilyId,
+    entries: Mutex<HashMap<Q::Key, Arc<Memo>>>,
+}
 
 /// Query calls shared by the workers in one operation, indexed by their Rust keys.
 /// For example, two workers asking for `words("lib.rs")` find one memo and share its
 /// validation, computation and decoded value. The whole table leaves with the operation;
 /// the backend keeps completed records and their small cross-operation validity proofs.
-#[derive(Default)]
-pub(crate) struct Memos(RwLock<HashMap<TypeId, Arc<dyn Any + Send + Sync>>>);
+pub(super) type MemoTables = RwLock<HashMap<TypeId, Arc<dyn Any + Send + Sync>>>;
 
-impl Memos {
+impl<S: Services> Operation<'_, S> {
     /// Find or create the place where this call will keep its result. A new memo is empty;
     /// getting it does not read storage, validate dependencies, or execute the query.
-    pub(crate) fn get<Q: Query>(&self, key: &Q::Key) -> Result<Arc<Memo>> {
+    pub(super) fn memo<Q: Query<Services = S>>(&self, key: &Q::Key) -> Result<Arc<Memo>> {
         // Look up the query's typed table first. Creating a previously unseen family needs an
         // exclusive map lock, but calls to existing families can find their tables concurrently.
         let table = self
-            .0
+            .memos
             .read()
             .expect("query families")
             .get(&TypeId::of::<Q>())
@@ -105,20 +108,27 @@ impl Memos {
         let table = match table {
             Some(table) => table,
             None => {
-                let mut families = self.0.write().expect("query families");
-                families
+                // Every key in this table belongs to the same cache-local family.
+                let family = self.database.registry.query_family::<Q>()?;
+                let mut tables = self.memos.write().expect("query families");
+                tables
                     .entry(TypeId::of::<Q>())
-                    .or_insert_with(|| Arc::new(Table::<Q>::default()))
+                    .or_insert_with(|| {
+                        Arc::new(Table::<Q> {
+                            family,
+                            entries: Mutex::default(),
+                        })
+                    })
                     .clone()
             }
         };
         let table = table.downcast::<Table<Q>>().expect("query family type");
-        let mut entries = table.lock().expect("query keys");
+        let mut entries = table.entries.lock().expect("query keys");
         if let Some(memo) = entries.get(key) {
             return Ok(memo.clone());
         }
         // Encode the replay address only when creating a memo. Later lookups use the typed key.
-        let address = Address::new(Q::NAME, key)?;
+        let address = Address::new(table.family, key)?;
         let memo = Arc::new(Memo {
             query_name: Q::NAME,
             id: address.id(),

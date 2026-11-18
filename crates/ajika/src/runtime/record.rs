@@ -9,7 +9,7 @@ use std::{collections::BTreeMap, sync::Arc};
 
 use wincode::{SchemaRead, SchemaWrite};
 
-use crate::{Durability, Lifetime, Persist, Result, Stamp, codec};
+use crate::{Durability, Lifetime, Persist, Result, Stamp, codec, interner::FamilyId};
 
 /// Identifies one query call across recomputations. Its metadata uses this key in storage.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash)]
@@ -33,20 +33,20 @@ pub(crate) type Slot = Option<Vec<u8>>;
 /// A query or input call represented as data: for example, the family `words` and key `"lib.rs"`.
 ///
 /// Saved dependencies need to make the same call after restarting, when Rust function pointers
-/// and in-process key tables are gone. The registry resolves the family name and decodes the key.
+/// and in-process key tables are gone. The registry resolves the family ID and decodes the key.
 /// Keep this full address even when a hash is enough for storage lookup: if a child's saved
 /// result is collected, its parent still needs the arguments with which to compute it again.
 #[derive(Debug, Clone, PartialEq, Eq, Hash, SchemaRead, SchemaWrite)]
 pub(crate) struct Address {
-    /// Stable name of the query or input implementation, shared by all calls with different keys.
-    pub(crate) family: String,
+    /// The cache's interner saves the name once for all calls to this family.
+    pub(crate) family: FamilyId,
     pub(crate) key: Vec<u8>,
 }
 
 impl Address {
-    pub(crate) fn new<K: Persist>(family: &str, key: &K) -> Result<Self> {
+    pub(crate) fn new<K: Persist>(family: FamilyId, key: &K) -> Result<Self> {
         Ok(Self {
-            family: family.to_owned(),
+            family,
             key: codec::encode(key)?,
         })
     }
@@ -56,8 +56,7 @@ impl Address {
     /// accumulating a separate historical entry for every result.
     pub(crate) fn id(&self) -> QueryId {
         let mut hash = blake3::Hasher::new();
-        hash.update(&(self.family.len() as u64).to_le_bytes());
-        hash.update(self.family.as_bytes());
+        hash.update(&self.family.0.to_le_bytes());
         hash.update(&self.key);
         QueryId(*hash.finalize().as_bytes())
     }

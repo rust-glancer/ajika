@@ -268,7 +268,7 @@ impl Backend {
         // The runtime's record schema has its own version, separate from the storage
         // adapter and the application's persisted query types.
         let mut database =
-            StorageDatabase::open(path, &format!("query-runtime-3:{epoch}"), options.storage)?;
+            StorageDatabase::open(path, &format!("query-runtime-4:{epoch}"), options.storage)?;
         let (interner, usage) = match Self::load_interner(&mut database) {
             Ok(interner) => {
                 let loaded = Self::load_usage(&database);

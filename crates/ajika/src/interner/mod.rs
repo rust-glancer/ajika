@@ -5,7 +5,10 @@
 //! inputs. New assignments stay in memory until a durable query checkpoint saves them alongside
 //! the values that may refer to them. They are never rolled back or reused within a live database.
 
+mod family;
+
 use std::{
+    borrow::Cow,
     collections::HashMap,
     sync::{Arc, Mutex},
     time::Instant,
@@ -13,6 +16,7 @@ use std::{
 
 use ajika_storage::{Database as StorageDatabase, Identity, Write};
 
+pub(crate) use self::family::{FamilyId, FamilyKind};
 use crate::{Error, Persist, Result, UnavailableData, codec, error::ensure};
 
 /// A database's shared interner for immutable objects.
@@ -51,10 +55,15 @@ impl Interner {
     /// assignment. Allocation does not open a transaction or mark any query as changed.
     fn intern(&self, namespace: String, key: &[u8]) -> Result<u32> {
         let mut state = self.state.lock().expect("interner state");
+        let family = namespace == family::NAMESPACE;
         let entries = state.namespaces.entry(namespace).or_default();
         if let Some(id) = entries.ids.get(key) {
             return Ok(*id);
         }
+        ensure!(
+            !family || entries.keys.len() <= usize::from(u16::MAX),
+            Error::contract("a cache can hold at most 65,536 query and input families"),
+        );
         let id = u32::try_from(entries.keys.len())?;
         let key: Arc<[u8]> = Arc::from(key);
         entries.keys.push(key.clone());
@@ -122,6 +131,13 @@ impl Interner {
     pub(crate) fn load(rows: Vec<(String, u32, Vec<u8>)>) -> Result<Self> {
         let interner = Self::default();
         for (namespace, expected, key) in rows {
+            if namespace == family::NAMESPACE {
+                ensure!(
+                    u16::try_from(expected).is_ok(),
+                    Error::invalid_cache("invalid family ID")
+                );
+                FamilyKind::decode(&key)?;
+            }
             ensure!(
                 interner.intern(namespace, &key)? == expected,
                 Error::invalid_cache("invalid identity sequence"),
@@ -221,6 +237,16 @@ impl Interner {
     }
 }
 
+// Internal namespaces begin with a NUL. Escape that prefix for application-supplied
+// names so even a custom declaration cannot share the family numbering space.
+fn application_namespace(name: &str) -> Cow<'_, str> {
+    if name.starts_with('\0') {
+        Cow::Owned(format!("\0{name}"))
+    } else {
+        Cow::Borrowed(name)
+    }
+}
+
 /// Connect an interned declaration's generated ID and fields to the shared interner.
 ///
 /// This is macro plumbing, re-exported through `__private`. Encoding happens before acquiring
@@ -237,7 +263,7 @@ pub trait Interned: Copy {
     fn intern(interner: &Interner, fields: Self::Fields) -> Result<Self> {
         let key = codec::encode(&fields)?;
         interner
-            .intern(Self::NAMESPACE.to_owned(), &key)
+            .intern(application_namespace(Self::NAMESPACE).into_owned(), &key)
             .map(Self::from_raw)
     }
 
@@ -245,7 +271,7 @@ pub trait Interned: Copy {
         let namespace = Self::NAMESPACE;
         let id = self.as_raw();
         let key = interner
-            .key(namespace, id)
+            .key(&application_namespace(namespace), id)
             .ok_or(UnavailableData::Identity { namespace, id })?;
         codec::decode(&key)
     }
