@@ -1,6 +1,6 @@
 use std::time::Duration;
 
-use ajika::{Database, Db, Inputs, Retention};
+use ajika::{Database, DatabaseOptions, Db, Inputs, Retention};
 
 #[ajika::input(key = String)]
 struct File {
@@ -45,11 +45,11 @@ fn main() -> anyhow::Result<()> {
     let mut database = Database::memory(
         Inputs::default(),
         (),
-        Retention {
+        DatabaseOptions::new(Retention {
             max_entries: 10_000,
             max_bytes: 256 * 1024 * 1024,
             max_idle: Duration::from_secs(24 * 60 * 60),
-        },
+        }),
     );
     // ANCHOR: edit
     let file = File::at("notes.txt".into());

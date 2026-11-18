@@ -4,7 +4,7 @@ use std::sync::atomic::{AtomicBool, Ordering};
 
 use ajika::{Error, ErrorKind, Result, ResultExt as _};
 
-use super::{Db, inputs, retention};
+use super::{Db, inputs, test_options};
 
 #[derive(Debug, thiserror::Error)]
 #[error("resource {name} is unavailable")]
@@ -19,8 +19,7 @@ fn resource(_db: &Db) -> Result<()> {
 
 #[test]
 fn application_payload_and_context_survive_parallel_sharing() -> anyhow::Result<()> {
-    let mut database = ajika::Database::memory(inputs(""), (), retention());
-    database.set_parallelism(2);
+    let mut database = ajika::Database::memory(inputs(""), (), test_options().parallelism(2));
     let result = database.run(|db| {
         db.parallel_map(&[(); 32], |db, _| resource(db))
             .context("loading resources")
@@ -79,7 +78,7 @@ fn application_accepts_anyhow_reports_and_preserves_their_chain() {
 
 #[test]
 fn cancellation_keeps_its_checkpoint_and_the_next_operation_can_run() -> anyhow::Result<()> {
-    let mut database = ajika::Database::memory(inputs(""), (), retention());
+    let mut database = ajika::Database::memory(inputs(""), (), test_options());
     let result = database
         .run(|_| -> Result<()> { Err(ajika::Cancelled::at("scan item").into()) })
         .context("analyzing a request");
@@ -110,7 +109,7 @@ fn answer(_db: &ajika::Db<'_, HostCancellation>) -> Result<u32> {
 #[test]
 fn host_cancellation_stops_runs_and_query_calls() -> Result<()> {
     let mut database =
-        ajika::Database::memory(inputs(""), HostCancellation::default(), retention());
+        ajika::Database::memory(inputs(""), HostCancellation::default(), test_options());
     assert_eq!(*database.run(answer)?, 42);
 
     database
@@ -135,7 +134,7 @@ fn host_cancellation_stops_runs_and_query_calls() -> Result<()> {
 
 #[test]
 fn an_observed_worker_failure_remains_a_failure_after_cancellation() -> anyhow::Result<()> {
-    let mut database = ajika::Database::memory(inputs(""), (), retention());
+    let mut database = ajika::Database::memory(inputs(""), (), test_options());
     let cancellation = database.cancellation();
     let result: Result<()> = database.run(|db| {
         let original = resource(db).expect_err("resource provider failed");
@@ -155,7 +154,7 @@ fn an_observed_worker_failure_remains_a_failure_after_cancellation() -> anyhow::
 
 #[test]
 fn callback_cancellation_does_not_hide_a_recorded_query_failure() -> anyhow::Result<()> {
-    let mut database = ajika::Database::memory(inputs(""), (), retention());
+    let mut database = ajika::Database::memory(inputs(""), (), test_options());
     let result: Result<()> = database.run(|db| {
         resource(db).expect_err("resource provider failed");
         Err(ajika::Cancelled::at("obsolete request").into())

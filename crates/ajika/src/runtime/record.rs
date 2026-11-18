@@ -137,10 +137,11 @@ pub(crate) struct Record {
     pub(crate) address: Address,
     // First-read order matters: a changed branch condition must stop validation before
     // the runtime tries to replay dependencies from the branch that is no longer selected.
-    pub(crate) dependencies: Vec<Dependency>,
+    // A pending record and the header prepared for disk share the same immutable read list.
+    pub(crate) dependencies: Arc<[Dependency]>,
     /// Last recorded use in Unix milliseconds, used for age-based collection rather than validity.
     pub(crate) last_used: u64,
-    /// Logical bytes charged to disk retention: this record's encoding plus its stored payloads.
+    /// Encoded bytes charged to this record in its store, including the payloads kept there.
     pub(crate) bytes: u64,
 }
 

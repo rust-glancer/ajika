@@ -1,8 +1,5 @@
-//! Completed editor work retained over the durable cache.
-//!
-//! A session record replaces the producer's complete output metadata, including removals.
-//! Only payloads whose versions differ from durable storage need resident values. Equal slots
-//! keep their disk lengths and can be loaded later without retaining their decoded objects.
+//! Session overrides and pending disk checkpoints hold complete query records in RAM.
+//! A record can reuse a payload from its baseline when both describe the same version.
 
 use std::{
     collections::{BTreeMap, HashMap},
@@ -11,7 +8,7 @@ use std::{
 
 use super::Stored;
 use crate::{
-    Result, Retention, codec,
+    Retention,
     runtime::{
         record::{QueryId, Record, RecordHeader, Slot},
         value::Value,
@@ -25,21 +22,34 @@ struct Entry {
 }
 
 #[derive(Default)]
-pub(super) struct SessionStore {
+pub(super) struct ResidentStore {
     entries: HashMap<QueryId, Entry>,
     bytes: u64,
     last_collection: u64,
 }
 
-impl SessionStore {
+impl ResidentStore {
+    /// The disk checkpoint uses the latest access time, including reads after the record was staged.
+    pub(super) fn entries(&self) -> impl Iterator<Item = (QueryId, &Stored, u64)> {
+        self.entries
+            .iter()
+            .map(|(id, entry)| (*id, &entry.stored, entry.used))
+    }
+
+    pub(super) fn contains(&self, id: &QueryId) -> bool {
+        self.entries.contains_key(id)
+    }
+
     pub(super) fn verified(&self, id: &QueryId) -> Option<u64> {
         self.entries.get(id).map(|entry| entry.verified)
     }
 
-    pub(super) fn set_verified(&mut self, id: &QueryId, revision: u64) {
+    pub(super) fn set_verified(&mut self, id: &QueryId, revision: u64) -> bool {
         if let Some(entry) = self.entries.get_mut(id) {
             entry.verified = revision;
+            return true;
         }
+        false
     }
 
     pub(super) fn record(&self, id: &QueryId) -> Option<Arc<Record>> {
@@ -56,52 +66,26 @@ impl SessionStore {
         stored.values.get(slot).cloned()
     }
 
-    pub(super) fn values(&self, id: &QueryId, header: &RecordHeader) -> BTreeMap<Slot, Value> {
-        header
-            .values
-            .keys()
-            .filter_map(|slot| {
-                self.value(id, header, slot)
-                    .map(|value| (slot.clone(), value))
-            })
-            .collect()
-    }
-
-    /// Prepare an override without publishing it. Measuring sizes invokes the value's schema,
-    /// so the caller runs this outside storage locks and installs it only after checkpoint success.
-    pub(super) fn prepare(
-        mut record: Record,
-        mut values: BTreeMap<Slot, Value>,
-        durable: Option<&Record>,
-        disk: bool,
-    ) -> Result<Stored> {
-        let mut bytes = 0;
-        for (slot, output) in &mut Arc::make_mut(&mut record.header).values {
-            let backing = durable
-                .and_then(|old| old.header.values.get(slot))
-                .filter(|old| old.version == output.version);
-            if let Some(backing) = backing
-                && (!disk || backing.length.is_some())
-            {
-                output.length = backing.length;
-                values.remove(slot);
-            } else {
-                output.length = None;
-                if let Some(value) = values.get(slot)
-                    && let Some(codec) = value.codec
+    /// Fill slots absent from the operation (for example, a draft promoted by validation
+    /// alone). A value from a superseded version cannot back the new record.
+    pub(super) fn fill_values(
+        &self,
+        id: &QueryId,
+        header: &RecordHeader,
+        values: &mut BTreeMap<Slot, Value>,
+    ) {
+        if let Some(entry) = self.entries.get(id) {
+            for (slot, value) in &entry.stored.values {
+                let previous = &entry.stored.record.header.values[slot];
+                if header
+                    .values
+                    .get(slot)
+                    .is_some_and(|current| current.version == previous.version)
                 {
-                    bytes += (codec.size)(&value.data)?;
-                } else {
-                    values.remove(slot);
+                    values.entry(slot.clone()).or_insert_with(|| value.clone());
                 }
             }
         }
-        values.retain(|slot, _| record.header.values.contains_key(slot));
-        record.bytes = bytes + codec::encoded_size(&record)?;
-        Ok(Stored {
-            record: Arc::new(record),
-            values,
-        })
     }
 
     pub(super) fn insert(&mut self, id: QueryId, stored: Stored, now: u64) {

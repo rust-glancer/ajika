@@ -1,7 +1,7 @@
 // ANCHOR: input
 use std::{sync::Arc, time::Duration};
 
-use ajika::{Database, Db, Inputs, Lifetime, Retention, Stamp};
+use ajika::{Database, DatabaseOptions, Db, Inputs, Lifetime, Retention, Stamp};
 
 #[derive(Clone)]
 struct Text {
@@ -38,11 +38,11 @@ fn main() -> anyhow::Result<()> {
         "editor-v1",
         Inputs::default(),
         (),
-        Retention {
+        DatabaseOptions::new(Retention {
             max_entries: 10_000,
             max_bytes: 256 * 1024 * 1024,
             max_idle: Duration::from_secs(24 * 60 * 60),
-        },
+        }),
     )?;
     let file = File::at("notes.txt".into());
     database.update_inputs(|update| {

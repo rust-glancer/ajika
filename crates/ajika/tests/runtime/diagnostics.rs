@@ -102,7 +102,7 @@ impl Subscriber for Recorder {
 #[test]
 fn filtering_diagnostics_keeps_info_quiet_and_trace_opt_in() -> anyhow::Result<()> {
     for level in [Level::INFO, Level::DEBUG, Level::TRACE] {
-        let mut db = ajika::Database::memory(super::inputs("hello"), (), super::retention());
+        let mut db = ajika::Database::memory(super::inputs("hello"), (), super::test_options());
         let (result, events) = capture(level, || db.run(|db| super::symbols(db, 1)));
         assert_eq!(result?.as_str(), "symbols:1:hello");
         assert_eq!(db.statistics().executed, 2);
@@ -139,7 +139,7 @@ fn keyed(db: &super::Db) -> ajika::Result<Vec<ajika::Output<u32>>> {
 
 #[test]
 fn keyed_slots_have_opaque_identities_shared_by_emission_and_reads() -> anyhow::Result<()> {
-    let mut db = ajika::Database::memory(super::inputs(""), (), super::retention());
+    let mut db = ajika::Database::memory(super::inputs(""), (), super::test_options());
     let (result, events) = capture(Level::TRACE, || {
         db.run(|db| {
             let outputs = keyed(db)?;

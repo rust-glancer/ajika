@@ -5,7 +5,7 @@ use std::{fs, sync::Arc};
 use ajika::{Database, Durability, InputInit, Inputs, Interner, Lifetime, Stamp};
 use anyhow::Result;
 
-use super::retention;
+use super::test_options;
 
 type Db<'a> = ajika::Db<'a, ()>;
 
@@ -37,7 +37,7 @@ fn field_updates_are_private_until_published_and_saved_inputs_can_be_restored() 
         package.set_text(update, "saved".into())?;
         package.set_edition(update, 2024)
     })?;
-    let mut database = Database::memory(saved.clone(), (), retention());
+    let mut database = Database::memory(saved.clone(), (), test_options());
     database.run(edition)?;
 
     let candidate = saved.edit(|update| package.set_text(update, "edited".into()))?;
@@ -129,7 +129,8 @@ fn lazy_inputs_are_shared_with_the_host_and_recaptured_on_restart() -> Result<()
         let sources = Inputs::default();
         // The database adds configuration over these source tables. A hit must still capture
         // the source in those tables so the host can validate it before accepting its project.
-        let mut database = Database::open(&storage, "inputs", sources.overlay(), (), retention())?;
+        let mut database =
+            Database::open(&storage, "inputs", sources.overlay(), (), test_options())?;
         let id = FileId::new(&database.interner(), path.clone())?;
         let file = File::at(id);
         assert_eq!(*database.run(|db| length(db, id))?, contents.len());
@@ -179,7 +180,7 @@ fn forgetting_an_observation_recaptures_it_without_changing_the_saved_snapshot()
         .into_owned();
     fs::write(&path, "before")?;
     let saved = Inputs::default();
-    let database = Database::memory(saved.clone(), (), retention());
+    let database = Database::memory(saved.clone(), (), test_options());
     let interner = database.interner();
     let id = FileId::new(&interner, path.clone())?;
     assert_eq!(&*saved.get(File::TEXT, &id, &database)?, "before");
@@ -248,7 +249,7 @@ fn arc_inputs_share_non_cloneable_payloads_and_apply_borrowed_policies() -> Resu
         &inputs.get(SessionFile::TEXT, &2, &interner)?
     ));
 
-    let mut database = Database::open(directory.path(), "inputs", inputs, (), retention())?;
+    let mut database = Database::open(directory.path(), "inputs", inputs, (), test_options())?;
     database.run(|db| {
         assert!(Arc::ptr_eq(&acquired, &SessionFile::at(0).text(db)?));
         for (key, expected) in [(0, 1), (1, 5), (2, 6)] {

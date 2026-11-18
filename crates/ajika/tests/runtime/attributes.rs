@@ -82,7 +82,7 @@ impl UnavailableType {
 
 #[test]
 fn query_attributes_keep_their_rust_scope() -> Result<()> {
-    let mut db = Database::memory(ajika::Inputs::default(), (), super::retention());
+    let mut db = Database::memory(ajika::Inputs::default(), (), super::test_options());
     let values = db.run(|db| {
         Ok([
             *allowed(db)?,
@@ -153,7 +153,7 @@ fn attributed_outputs(db: &Db<'_>) -> ajika::Result<AttributedOutputs> {
 
 #[test]
 fn output_attributes_preserve_slots_and_traits_apply_to_handles() -> Result<()> {
-    let mut db = Database::memory(super::inputs(""), (), super::retention());
+    let mut db = Database::memory(super::inputs(""), (), super::test_options());
     let generated = db.run(attributed_outputs)?;
     assert_eq!(*generated, generated.as_ref().clone());
     assert!(generated.Extra.is_none());

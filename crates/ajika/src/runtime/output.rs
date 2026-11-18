@@ -177,11 +177,11 @@ mod tests {
         let mut database = Database::memory(
             Inputs::default(),
             (),
-            Retention {
+            crate::DatabaseOptions::new(Retention {
                 max_entries: 1,
                 max_bytes: 1024,
                 max_idle: Duration::from_secs(60),
-            },
+            }),
         );
         database.run(|db| {
             let producer = Address::new("producer", &())?;

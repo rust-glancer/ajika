@@ -105,13 +105,17 @@ pub struct Statistics {
     pub resident_hits: u64,
     /// Times a worker waited for another worker's query claim.
     pub waits: u64,
-    /// Complete query records reclaimed at an operation boundary.
+    /// Query records reclaimed during the latest operation and subsequent collection.
     pub collected: u64,
-    /// Complete cache records after the operation's optional collection.
+    /// Records in the persistent backend. Pending replacements are counted separately.
     pub stored_queries: u64,
     /// Logical encoded bytes, excluding index overhead and allocator capacity.
     /// The typed memory backend does not serialize values to produce this counter.
     pub stored_bytes: u64,
+    /// Persistent records waiting in memory for a deferred checkpoint.
+    pub pending_queries: u64,
+    /// Estimated encoded bytes of pending records and resident persistent payloads.
+    pub pending_bytes: u64,
     /// Session records retained after the operation, separate from the durable cache.
     pub session_queries: u64,
     /// Encoded-size estimate of retained session records and changed payloads. Disk-backed

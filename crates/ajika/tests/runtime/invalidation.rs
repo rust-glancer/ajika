@@ -3,7 +3,7 @@ use std::sync::Arc;
 use ajika::{Database, Output};
 use anyhow::Result;
 
-use super::{Db, Settings, Sources, declarations, diagnostics, inputs, retention};
+use super::{Db, Settings, Sources, declarations, diagnostics, inputs, test_options};
 
 #[ajika::query]
 fn repeated_output(db: &Db, output: Output<String>, consumer: u32) -> ajika::Result<String> {
@@ -31,7 +31,7 @@ fn repeated_output_reads_remain_dependencies_in_every_consumer() -> Result<()> {
     let path = directory.path().join("queries");
     for (text, expected_executions) in [("one", 6), ("one ", 1), ("two", 6), ("two", 0)] {
         // Reopening also exercises validation with no resident values or validity state.
-        let mut db = Database::open(&path, "test", inputs(text), (), retention())?;
+        let mut db = Database::open(&path, "test", inputs(text), (), test_options())?;
         let expected = (0..4)
             .map(|id| format!("{id}:{}", text.trim()))
             .collect::<Vec<_>>();
@@ -49,7 +49,13 @@ fn transient_output(db: &Db) -> ajika::Result<Output<String>> {
 #[test]
 fn borrowed_output_survives_reconstructing_its_producer() -> Result<()> {
     let directory = tempfile::tempdir()?;
-    let mut db = Database::open(directory.path(), "test", inputs("hello"), (), retention())?;
+    let mut db = Database::open(
+        directory.path(),
+        "test",
+        inputs("hello"),
+        (),
+        test_options(),
+    )?;
     let output = db.run(|db| Ok(transient_output(db)?.as_ref().clone()))?;
 
     db.run(|db| {
@@ -79,7 +85,13 @@ fn configuration_label(db: &Db) -> ajika::Result<String> {
 fn durability_skips_unaffected_subgraphs_but_never_skips_restart_validation() -> Result<()> {
     let directory = tempfile::tempdir()?;
     let path = directory.path().join("queries");
-    let mut db = Database::open(&path, "test", Sources::default().capture(), (), retention())?;
+    let mut db = Database::open(
+        &path,
+        "test",
+        Sources::default().capture(),
+        (),
+        test_options(),
+    )?;
     db.run(configuration_label)?;
 
     for medium in [false, true] {
@@ -118,7 +130,13 @@ fn durability_skips_unaffected_subgraphs_but_never_skips_restart_validation() ->
     assert_eq!(db.statistics().executed, 2);
     drop(db);
 
-    let mut db = Database::open(&path, "test", Sources::default().capture(), (), retention())?;
+    let mut db = Database::open(
+        &path,
+        "test",
+        Sources::default().capture(),
+        (),
+        test_options(),
+    )?;
     assert_eq!(db.run(configuration_label)?.as_str(), "configuration: 0");
     assert_eq!(db.statistics().executed, 2, "reopening captures new inputs");
     Ok(())
@@ -161,7 +179,13 @@ fn selected_length(db: &Db, output: Output<String>) -> ajika::Result<usize> {
 fn removing_an_output_updates_its_consumers_and_reclaims_its_payload() -> Result<()> {
     let directory = tempfile::tempdir()?;
     let path = directory.path().join("queries");
-    let mut db = Database::open(&path, "test", inputs(&"x".repeat(200_000)), (), retention())?;
+    let mut db = Database::open(
+        &path,
+        "test",
+        inputs(&"x".repeat(200_000)),
+        (),
+        test_options(),
+    )?;
     assert_eq!(*db.run(optional_length)?, 200_000);
     let selected = db.run(|db| Ok(optional_payload(db)?.text.clone().expect("emitted text")))?;
     assert_eq!(
@@ -209,7 +233,7 @@ fn removing_an_output_updates_its_consumers_and_reclaims_its_payload() -> Result
     })?;
     drop(db);
 
-    let mut db = Database::open(&path, "test", inputs(""), (), retention())?;
+    let mut db = Database::open(&path, "test", inputs(""), (), test_options())?;
     assert_eq!(*db.run(optional_length)?, 0);
     assert_eq!(db.statistics().executed, 0);
     db.replace_inputs(inputs("restored"));
@@ -245,10 +269,10 @@ fn uses_unregistered(db: &Db) -> ajika::Result<Arc<u32>> {
 fn unavailable_registrations_are_distinct_from_changed_values() -> Result<()> {
     let directory = tempfile::tempdir()?;
     let path = directory.path().join("queries");
-    let mut db = Database::open(&path, "test", inputs(""), (), retention())?;
+    let mut db = Database::open(&path, "test", inputs(""), (), test_options())?;
     assert_eq!(*db.run(uses_unregistered)?, 7);
     drop(db);
-    let mut db = Database::open(&path, "test", inputs(""), (), retention())?;
+    let mut db = Database::open(&path, "test", inputs(""), (), test_options())?;
     let (result, events) =
         diagnostics::capture(tracing::Level::DEBUG, || db.run(uses_unregistered));
     assert_eq!(*result?, 7);
@@ -261,5 +285,39 @@ fn unavailable_registrations_are_distinct_from_changed_values() -> Result<()> {
             ("dependency", "unregistered"),
         ],
     );
+    Ok(())
+}
+
+#[test]
+fn deferred_output_removal_hides_the_disk_slot_until_collection_reclaims_it() -> Result<()> {
+    let directory = tempfile::tempdir()?;
+    let mut db = Database::open(
+        directory.path(),
+        "test",
+        inputs("old"),
+        (),
+        test_options().defer_checkpoints(1024 * 1024),
+    )?;
+    let old = db.run(|db| Ok(optional_payload(db)?.text.clone().expect("emitted slot")))?;
+    assert_eq!(*db.run(optional_length)?, 3);
+    db.collect()?;
+    let before = db.storage_statistics()?.expect("disk database").values;
+
+    db.replace_inputs(inputs(""));
+    assert_eq!(*db.run(optional_length)?, 0);
+    assert!(db.run(|db| old.value(db)).is_err());
+    assert_eq!(
+        db.storage_statistics()?.expect("disk database").values,
+        before
+    );
+
+    db.collect()?;
+    // The producer and consumer both survived. Only the optional slot lost its backing.
+    assert_eq!(
+        db.storage_statistics()?.expect("disk database").values,
+        before - 1
+    );
+    assert_eq!(*db.run(optional_length)?, 0);
+    assert_eq!(db.statistics().executed, 0);
     Ok(())
 }

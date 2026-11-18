@@ -10,7 +10,7 @@ use std::{
     time::{Duration, Instant},
 };
 
-use ajika::{Database, Inputs, Lifetime, Retention};
+use ajika::{Database, DatabaseOptions, Inputs, Lifetime, Retention};
 use anyhow::{Context, Result};
 use serde::Serialize;
 
@@ -40,13 +40,13 @@ impl Host {
         // Relative IDs belong to this source root. Reusing a cache for another handbook
         // must not accidentally reuse its assignments or observations.
         let epoch = format!("handbook-v2:{}", root.display());
-        let mut database = match cache {
+        let options = DatabaseOptions::new(retention).parallelism(workers);
+        let database = match cache {
             Some(path) => {
-                Database::open(path, &epoch, inputs.clone(), Activity::default(), retention)?
+                Database::open(path, &epoch, inputs.clone(), Activity::default(), options)?
             }
-            None => Database::memory(inputs.clone(), Activity::default(), retention),
+            None => Database::memory(inputs.clone(), Activity::default(), options),
         };
-        database.set_parallelism(workers);
         let mut host = Self {
             root,
             database,

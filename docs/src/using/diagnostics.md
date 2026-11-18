@@ -17,7 +17,8 @@ operation and its nested calls, not just the root request.
 | `decoded`, `bytes_read` | Payload acquisition, including old answers read for equality. |
 | `compared`, `unchanged` | Equality checks and recomputations that preserved versions. |
 | `resident_hits`, `waits` | Sharing within the operation and contention for unfinished calls. |
-| `bytes_written`, `metadata_writes` | Encoded payload work and checkpointed record updates. |
+| `bytes_written`, `metadata_writes` | Payload and metadata writes, including collection since the latest operation. |
+| `pending_queries`, `pending_bytes` | Persistent records awaiting a disk write and their estimated size. |
 | `session_queries`, `session_bytes` | The retained session working set after collection. |
 
 For example, zero executions with a large `bytes_read` suggests that the request
@@ -76,8 +77,9 @@ collection. It is not how Ajika detects stale answers. Input stamps and dependen
 versions do that on demand, even one millisecond after an edit.
 
 Entry, age, and byte budgets reclaim whole query records with their outputs.
-Successful operations collect periodically or when over budget; `collect()`
-lets the host request an idle-boundary pass. There is no background timer.
+Eager databases collect periodically or when over budget. For
+[deferred writes](persistence.md#defer-writes-until-idle), call `collect()`
+at an idle boundary. There is no background timer.
 
 Logical retained bytes, compressed payload bytes, physical files, and allocator
 memory are different measurements. `storage_statistics()` exposes physical

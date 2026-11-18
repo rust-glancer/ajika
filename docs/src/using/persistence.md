@@ -18,12 +18,24 @@ Run it with `cargo run -p ajika-persistence`.
 
 `path` names a directory the application has chosen for rebuildable query data.
 The example uses a temporary directory so running it leaves no permanent cache.
-The operation checkpoints successful work before returning. No per-query save
+With the default options, the operation writes successful work before returning. No per-query save
 call is needed, and dropping the owner releases its directory lock.
 
 Only one owner may open that storage directory at a time. Parallel query calls
 share one owner through an operation; opening another database for each worker is
 not the concurrency model.
+
+## Defer writes until idle
+
+Use `DatabaseOptions::new(limits).defer_checkpoints(64 * 1024 * 1024)` to keep
+up to about 64 MiB of pending records and payloads in RAM. Later requests can
+reuse them immediately, and repeated edits to a producer share one disk write.
+If a run exceeds the budget, it commits the batch before returning. The budget
+uses estimated encoded sizes.
+
+Call `database.collect()?` when the application is idle or before closing it.
+It synchronizes pending work to disk, applies retention, and returns the number
+of records evicted. Dropping the database discards any work still pending.
 
 ## Reopening still needs fresh inputs
 
@@ -55,8 +67,8 @@ Ask again under the same inputs:
 ```
 
 No dependency walk is needed: this owner already verified the answer for its current
-revision. But the previous operation released its decoded working set, so this one
-decodes the requested value again.
+revision. With the default disk options, the previous operation released its decoded
+working set, so this one decodes the requested value again.
 
 | When a query is requested | Typical work |
 | --- | --- |
@@ -103,4 +115,4 @@ The host should reject incoherent input capture before returning successfully fr
 The host still owns publication of an editor response or project generation.
 Cancellation can arrive after a checkpoint has committed. Stored results
 remain associated with the observations they actually used. See
-[`Database::run`](https://github.com/rust-glancer/ajika/blob/main/crates/ajika/src/runtime/mod.rs#L238) and [checkpointing](../internals/checkpoints.md).
+[`Database::run`](https://github.com/rust-glancer/ajika/blob/main/crates/ajika/src/runtime/mod.rs#L279) and [checkpointing](../internals/checkpoints.md).

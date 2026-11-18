@@ -466,7 +466,7 @@ impl<'db, S: Services> Db<'db, S> {
         let mut lifetime = Lifetime::Persistent;
         // Do not inspect later reads after a changed guard. They may belong to an old branch
         // that the new execution will never enter, including an output that no longer exists.
-        for dependency in &record.dependencies {
+        for dependency in record.dependencies.iter() {
             self.check_cancelled()?;
             let (child_durability, child_lifetime) = match dependency {
                 Dependency::Input(address, observed) => {
@@ -646,14 +646,14 @@ impl<'db, S: Services> Db<'db, S> {
         // identical metadata merely because a provider had to run again.
         let dirty = changed
             || previous.is_none_or(|old| {
-                old.dependencies != reads.dependencies
+                old.dependencies.as_ref() != reads.dependencies
                     || old.header.values != records
                     || old.header.durability != reads.durability
                     || old.header.lifetime != reads.lifetime
             });
         let record = Arc::new(Record {
             address: memo.address.clone(),
-            dependencies: reads.dependencies,
+            dependencies: reads.dependencies.into(),
             header: Arc::new(RecordHeader {
                 values: records,
                 durability: reads.durability,
@@ -722,11 +722,11 @@ mod tests {
         let mut database = Database::memory(
             Inputs::default(),
             (),
-            Retention {
+            crate::DatabaseOptions::new(Retention {
                 max_entries: 1,
                 max_bytes: 1024,
                 max_idle: Duration::from_secs(60),
-            },
+            }),
         );
         database.run(|db| {
             let first = label(db, 7)?;
