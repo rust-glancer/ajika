@@ -79,7 +79,7 @@ pub(crate) struct FrameHeader {
 
 impl FrameHeader {
     // wincode stores the enum discriminant as a u32. The remaining fields have fixed widths.
-    pub(crate) const LENGTH: u64 = 32 + 8 + 8 + 4 + 4;
+    pub(crate) const LENGTH: u64 = size_of::<Id>() as u64 + 8 + 8 + 4 + 4;
 
     pub(crate) fn frame_length(&self) -> u64 {
         Self::LENGTH + self.stored_length

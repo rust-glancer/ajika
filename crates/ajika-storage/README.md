@@ -19,7 +19,7 @@ use ajika_storage::{Compression, Database, Options};
 
 # fn main() -> anyhow::Result<()> {
 let database = Database::open(std::path::Path::new("query-storage"), "schema-1", Options::default())?;
-let id = [42; 32];
+let id = [42; 16];
 let bytes = b"already serialized result".to_vec();
 let length = bytes.len() as u64;
 let value = Compression::Lz4.encode(bytes)?;

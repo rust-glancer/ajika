@@ -5,15 +5,18 @@ must describe that call as data, so a new process can make it again.
 
 For `words("notes.txt")`, that description contains two things:
 
-- The query family's stable name, such as `example::words`.
+- The two-byte family number this cache assigned to `example::words`.
 - The encoded key, `"notes.txt"`.
 
-Together they form an [`Address`](https://github.com/rust-glancer/ajika/blob/main/crates/ajika/src/runtime/record.rs#L34). Inputs use the same kind of address
-for a field family and key.
+Together they form an [`Address`](https://github.com/rust-glancer/ajika/blob/main/crates/ajika/src/runtime/record.rs#L40). Inputs use the same kind of address
+for a field family and key. On first use, the cache assigns the next available
+number. The interner saves each family name once, in the same checkpoint as
+the records that use its number. A cache has room for 65,536 query and input
+families combined.
 
 ## The same question can have a new answer
 
-The storage ID is a 32-byte hash of that address. It identifies the question, not
+The storage ID is a hash of that address. It identifies the question, not
 the answer's contents. Changing the file replaces work at the same logical address
 instead of creating a new historical entry for every text version.
 
@@ -54,11 +57,12 @@ One key argument is used directly; zero or multiple key arguments become a tuple
 Associated queries use the same machinery. Their computation stays in the owning
 impl so `Self` and helper calls keep normal Rust meaning.
 
-For a saved address, the runtime has only a family name and encoded key, so it
+For a saved address, the runtime has only a family number and encoded key, so it
 also needs a way to find this provider and decode its arguments. The macro emits
 a registration gathered by `inventory` when the program links. At database
-construction, [`Registry::linked`](https://github.com/rust-glancer/ajika/blob/main/crates/ajika/src/runtime/registry.rs#L38) collects the query implementations for
-that database's services type, alongside the input declarations.
+construction, [`Registry::linked`](https://github.com/rust-glancer/ajika/blob/main/crates/ajika/src/runtime/registry.rs#L65) collects the query implementations for
+that database's services type, alongside the input declarations. It connects
+the restored family numbers to these implementations by name.
 
 This means replay works before the application has directly called every query
 function. There is no “warm up registrations by executing queries” step.
@@ -68,7 +72,7 @@ Handwritten `Query` implementations use `#[ajika::register]` for the same purpos
 
 When validating `word_count`, Ajika checks whether `words` still has the version
 the count depended on. Comparing those versions does not require the word vector
-itself. [`Registry::replay`](https://github.com/rust-glancer/ajika/blob/main/crates/ajika/src/runtime/registry.rs#L75) resolves the saved family name, decodes the key,
+itself. [`Registry::replay`](https://github.com/rust-glancer/ajika/blob/main/crates/ajika/src/runtime/registry.rs#L168) looks up the saved family number, decodes the key,
 and enters the same evaluator used by a typed query call.
 
 If the child's dependencies still match, the evaluator can establish its current
@@ -89,8 +93,8 @@ call code; it does not fingerprint the implementation.
 
 ## Interning is separate from query registration
 
-The registry connects query names to executable code. The interner instead gives
-application values, such as file paths, compact IDs. An interned `FileId` can
+The registry connects family numbers to executable code. The interner also gives
+application values, such as file paths, their own compact IDs. An interned `FileId` can
 appear inside many query keys, each of which identifies a different question
 about that file.
 
@@ -98,6 +102,6 @@ The interner is shared for the database's lifetime and restored before queries
 intern new objects. Each declaration has its own numbering space. Looking up an
 ID's fields does not add a query dependency because the assignment is immutable.
 
-See [`Interner`](https://github.com/rust-glancer/ajika/blob/main/crates/ajika/src/interner/mod.rs#L33) for assignment ownership and the
+See [`Interner`](https://github.com/rust-glancer/ajika/blob/main/crates/ajika/src/interner/mod.rs#L39) for assignment ownership and the
 [user chapter](../using/interning.md) for its reset boundary. The interner must
 remain consistent with every saved key that contains its IDs.

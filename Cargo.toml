@@ -34,7 +34,6 @@ ajika_macros = { path = "crates/ajika-macros", version = "0.1.7" }
 ajika_storage = { path = "crates/ajika-storage", version = "0.1.7" }
 
 anyhow = "1.0.104"
-blake3 = "1.8.7"
 crc32c = "0.6.9"
 divan = { package = "codspeed-divan-compat", version = "6.0.0" }
 getrandom = "0.4.3"
@@ -47,6 +46,7 @@ syn = "3.0"
 tempfile = "3.27.0"
 thiserror = "2.0.21"
 tracing = "0.1.44"
+twox-hash = { version = "2.1.5", default-features = false }
 wincode = "0.6.3"
 zstd = { version = "0.14.4", default-features = false }
 

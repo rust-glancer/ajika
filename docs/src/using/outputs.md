@@ -59,6 +59,13 @@ The previously retained locations handle reads the **new** locations. A handle
 names a slot under the active inputs. It is not an immutable snapshot of its old
 payload. A retained `Arc<T>`, by contrast, still contains the old value.
 
+A saved handle belongs to the cache that issued it. If you save a handle
+outside Ajika, its producer's family assignment must reach a checkpoint before
+you can rely on it after reopening. With deferred checkpoints, call
+`Database::collect` before closing to flush pending persistent results and
+their family assignments. A fresh cache can assign the same number to a
+different producer.
+
 ## What splitting does and does not buy
 
 Outputs provide separate loading and separate change propagation. They do not

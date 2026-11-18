@@ -1,9 +1,9 @@
 use std::sync::Arc;
 
-use ajika::{Database, Output};
+use ajika::{Database, DatabaseOptions, Output, Retention};
 use anyhow::Result;
 
-use super::{Db, Settings, Sources, declarations, diagnostics, inputs, test_options};
+use super::{Db, Settings, Sources, declarations, diagnostics, inputs, retention, test_options};
 
 #[ajika::query]
 fn repeated_output(db: &Db, output: Output<String>, consumer: u32) -> ajika::Result<String> {
@@ -79,6 +79,37 @@ fn configuration(db: &Db) -> ajika::Result<u32> {
 #[ajika::query]
 fn configuration_label(db: &Db) -> ajika::Result<String> {
     Ok(format!("configuration: {}", configuration(db)?))
+}
+
+#[test]
+fn saved_output_replays_its_producer_after_collection_and_reopen() -> Result<()> {
+    let directory = tempfile::tempdir()?;
+    // Collecting this deferred checkpoint saves the family assignments and evicts the
+    // producers. The handle will have to find its original implementation after restart.
+    let options = DatabaseOptions::new(Retention {
+        max_entries: 0,
+        ..retention()
+    })
+    .defer_checkpoints(1024 * 1024);
+    let mut db = Database::open(directory.path(), "test", inputs("first"), (), options)?;
+    let output = db.run(declarations)?;
+    db.run(configuration)?;
+    let saved = wincode::serialize(&output.shape)?;
+    assert!(db.collect()? > 0);
+    assert_eq!(db.statistics().stored_queries, 0);
+    drop(db);
+
+    let mut db = Database::open(
+        directory.path(),
+        "test",
+        inputs("second"),
+        (),
+        test_options(),
+    )?;
+    db.run(configuration)?;
+    let handle: Output<String> = wincode::deserialize_exact(&saved)?;
+    assert_eq!(db.run(|db| handle.value(db))?.as_str(), "second");
+    Ok(())
 }
 
 #[test]

@@ -19,9 +19,9 @@ zstd.workspace = true
 
 [dev-dependencies]
 anyhow.workspace = true
-blake3.workspace = true
 divan.workspace = true
 tempfile.workspace = true
+twox-hash = { workspace = true, features = ["xxhash3_128"] }
 
 [[bench]]
 name = "storage"

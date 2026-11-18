@@ -36,7 +36,7 @@ impl Events {
         for event in &self.0 {
             assert_eq!(event["op"], op.to_string());
             assert_eq!(event["revision"], revision.to_string());
-            assert_eq!(event["call_id"].len(), 64);
+            assert_eq!(event["call_id"].len(), 32);
             assert_eq!(event["call"], event["call_id"][..8]);
         }
         op

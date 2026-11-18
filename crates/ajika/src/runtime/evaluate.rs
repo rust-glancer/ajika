@@ -65,13 +65,16 @@ impl<'db, S: Services> Db<'db, S> {
         self.handle(|| {
             self.check_cancelled()?;
             if let Some(value) = self.frame.query::<Q>(&key) {
-                // This fast path normally avoids encoding the key. Only diagnostics need its
-                // address, and a diagnostic failure must not turn a successful read into an error.
+                // The earlier read already created a memo with the encoded address.
+                // Only tracing needs to look it up on a repeated read.
                 if tracing::enabled!(target: diagnostics::TARGET, tracing::Level::TRACE)
-                    && let Ok(address) = Address::new(Q::NAME, &key)
+                    && let Ok(memo) = self.operation.memo::<Q>(&key)
                 {
-                    self.operation
-                        .diagnostic_reuse(&address, &None, ReuseReason::ResidentValue);
+                    self.operation.diagnostic_reuse(
+                        &memo.address,
+                        &None,
+                        ReuseReason::ResidentValue,
+                    );
                 }
                 return Ok(value);
             }
@@ -112,9 +115,11 @@ impl<'db, S: Services> Db<'db, S> {
     pub fn input<T: Input>(&self, key: T::Key) -> Result<T::Value> {
         self.handle(|| {
             self.check_cancelled()?;
-            let captured = self.operation.database.inputs.read::<T>(&key, self)?;
+            let database = self.operation.database;
+            let captured = database.inputs.read::<T>(&key, self)?;
+            let address = Address::new(database.registry.input_family::<T>()?, &key)?;
             self.frame.depend(
-                Dependency::Input(Address::new(T::NAME, &key)?, captured.record.stamp),
+                Dependency::Input(address, captured.record.stamp),
                 captured.record.durability,
                 captured.record.lifetime,
             );
@@ -189,7 +194,7 @@ impl<'db, S: Services> Db<'db, S> {
                 registry
                     .replay(self, address, false)?
                     .ok_or_else(|| UnavailableData::Output {
-                        producer: address.family.clone(),
+                        producer: registry.family_name(address.family).to_string(),
                         slot: slot.to_vec(),
                     })?;
             let slot = Some(slot.to_vec());
@@ -201,7 +206,7 @@ impl<'db, S: Services> Db<'db, S> {
                 value = self.materialize_output::<T>(&memo, &slot)?;
             }
             let value = value.ok_or_else(|| UnavailableData::Output {
-                producer: address.family.clone(),
+                producer: memo.query_name.to_owned(),
                 slot: slot.clone().unwrap_or_default(),
             })?;
             let state = memo.lock();
@@ -238,13 +243,12 @@ impl<'db, S: Services> Db<'db, S> {
             };
             if !header.values.contains_key(slot) {
                 return Err(UnavailableData::Output {
-                    producer: memo.address.family.clone(),
+                    producer: memo.query_name.to_owned(),
                     slot: slot.clone().unwrap_or_default(),
                 }
                 .into());
             }
-            let Some(value) = self.load(&memo.address, &header, slot, Codec::of::<T>(), false)?
-            else {
+            let Some(value) = self.load(memo, &header, slot, Codec::of::<T>(), false)? else {
                 return Ok(None);
             };
             let result = value.typed()?;
@@ -269,7 +273,7 @@ impl<'db, S: Services> Db<'db, S> {
         want_value: bool,
     ) -> Result<Arc<Memo>> {
         self.check_cancelled()?;
-        let memo = self.operation.memos.get::<Q>(&key)?;
+        let memo = self.operation.memo::<Q>(&key)?;
         self.operation.touch(&memo);
         let ready = || {
             let state = memo.lock();
@@ -320,8 +324,15 @@ impl<'db, S: Services> Db<'db, S> {
             // A released header does not erase the proof that its result is still valid.
             // Recover the output metadata before deciding whether dependencies need checking.
             if memo.lock().header.is_none() {
-                let verified = database.backend.verified(&memo.id);
-                if verified == 0 || verified < database.changed_at[Durability::High as usize] {
+                let stored_revision = database.backend.verified(&memo.id);
+                let verified = stored_revision.unwrap_or(0);
+                if stored_revision.is_none() && database.backend.is_disk() {
+                    // The revision lookup already checked session records, pending writes, and
+                    // the full inventory of saved queries. Remember the miss for this operation.
+                    database.backend.check()?;
+                    memo.lock().record_loaded = true;
+                } else if verified == 0 || verified < database.changed_at[Durability::High as usize]
+                {
                     // On restart, or after all durability classes changed, dependency
                     // validation is unavoidable. Read the complete record once instead
                     // of loading a header and immediately fetching that same row again.
@@ -398,7 +409,7 @@ impl<'db, S: Services> Db<'db, S> {
                 }
                 if let Some(codec) = Q::storage().codec {
                     let current = memo.lock().header.clone().expect("verified header");
-                    if let Some(value) = self.load(&memo.address, &current, &None, codec, false)? {
+                    if let Some(value) = self.load(&memo, &current, &None, codec, false)? {
                         Q::validate(value.typed::<Q::Value>()?.as_ref())?;
                         memo.lock().values.insert(None, value);
                         self.operation.stats().hits += 1;
@@ -461,7 +472,8 @@ impl<'db, S: Services> Db<'db, S> {
     /// If every read matches, return the dependencies' combined reuse policy. Their durability
     /// or persistence can change even when their answers remain equal.
     fn validate(&self, record: &Record) -> Result<Option<(Durability, Lifetime)>> {
-        let _span = tracing::trace_span!("ajika.validate", query = record.address.family).entered();
+        let registry = &self.operation.database.registry;
+        let _span = tracing::trace_span!("ajika.validate", query = %registry.family_name(record.address.family)).entered();
         let mut durability = Durability::High;
         let mut lifetime = Lifetime::Persistent;
         // Do not inspect later reads after a changed guard. They may belong to an old branch
@@ -470,7 +482,7 @@ impl<'db, S: Services> Db<'db, S> {
             self.check_cancelled()?;
             let (child_durability, child_lifetime) = match dependency {
                 Dependency::Input(address, observed) => {
-                    let Some(input) = self.operation.database.registry.stamp(self, address)? else {
+                    let Some(input) = registry.stamp(self, address)? else {
                         self.operation.diagnostic_invalidated(
                             &record.address,
                             dependency,
@@ -489,12 +501,7 @@ impl<'db, S: Services> Db<'db, S> {
                     (input.durability, input.lifetime)
                 }
                 Dependency::Value(address, slot, observed) => {
-                    let Some(memo) = self
-                        .operation
-                        .database
-                        .registry
-                        .replay(self, address, false)?
-                    else {
+                    let Some(memo) = registry.replay(self, address, false)? else {
                         self.operation.diagnostic_invalidated(
                             &record.address,
                             dependency,
@@ -597,7 +604,7 @@ impl<'db, S: Services> Db<'db, S> {
                 let resident = memo.lock().values.get(slot).cloned();
                 let old_value = match resident {
                     Some(value) => Some(value),
-                    None => self.load(&previous.address, &previous.header, slot, codec, true)?,
+                    None => self.load(memo, &previous.header, slot, codec, true)?,
                 };
                 if let Some(old) = old_value {
                     let _span = tracing::trace_span!("ajika.compare", query = Q::NAME).entered();
@@ -674,24 +681,23 @@ impl<'db, S: Services> Db<'db, S> {
     }
 
     /// Fetch one stored payload for reuse or for comparison with a newly computed answer.
-    /// The header supplies its encoded length; the address and slot locate it. Returning None
+    /// The header supplies its encoded length; the memo's ID and slot locate it. Returning None
     /// means the backend has no retained payload described by this header. The caller decides
     /// whether to recompute. This step accounts for decoding cost but does not decide validity
     /// or record a dependency.
     fn load(
         &self,
-        address: &Address,
+        memo: &Memo,
         header: &RecordHeader,
         slot: &Slot,
         codec: Codec,
         comparison: bool,
     ) -> Result<Option<Value>> {
-        let _span = tracing::trace_span!("ajika.load", query = address.family).entered();
-        let value = self
-            .operation
-            .database
+        let database = self.operation.database;
+        let _span = tracing::trace_span!("ajika.load", query = memo.query_name).entered();
+        let value = database
             .backend
-            .value(address, header, slot, codec, &|| self.check_cancelled())?;
+            .value(&memo.id, header, slot, codec, &|| self.check_cancelled())?;
         if value.as_ref().is_some_and(|(_, decoded)| *decoded) {
             let mut statistics = self.operation.stats();
             statistics.decoded += 1;

@@ -60,6 +60,9 @@ struct Identity {
 /// to read just that table. It depends on the shape's answer, so changing only locations need not
 /// rerun the consumer. Both tables are still computed together when their producer needs execution.
 ///
+/// A handle belongs to the cache that issued it. Reopening the cache restores checkpointed
+/// family assignments. A fresh cache can assign the same number to a different producer.
+///
 /// The handle holds an address, not the table or a particular version of it. Keeping or saving
 /// the handle does not keep the table in memory. Two handles for the same query/key/slot compare
 /// equal even when its data changes, allowing a set of output handles to remain equal. Reading
@@ -170,21 +173,21 @@ mod tests {
     use std::{sync::Arc, time::Duration};
 
     use super::{Address, Output, OutputSlot};
-    use crate::{Database, Inputs, Result, Retention};
+    use crate::{Database, DatabaseOptions, Inputs, Result, Retention, interner::FamilyId};
 
     #[test]
     fn borrowed_output_survives_a_second_publication() -> Result<()> {
         let mut database = Database::memory(
             Inputs::default(),
             (),
-            crate::DatabaseOptions::new(Retention {
+            DatabaseOptions::new(Retention {
                 max_entries: 1,
                 max_bytes: 1024,
                 max_idle: Duration::from_secs(60),
             }),
         );
         database.run(|db| {
-            let producer = Address::new("producer", &())?;
+            let producer = Address::new(FamilyId(0), &())?;
             let slot = "text".encode()?;
 
             // The frame is the sole owner, as it can be after a producer rebuilds its memo.

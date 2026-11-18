@@ -55,7 +55,7 @@ pub struct QueryCall {
     /// Registered query family name.
     pub query: String,
     /// Full address hash, matching the diagnostics target's `call_id` field.
-    pub id: [u8; 32],
+    pub id: [u8; 16],
 }
 
 impl fmt::Display for QueryCall {

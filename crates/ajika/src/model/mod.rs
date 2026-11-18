@@ -7,7 +7,14 @@
 
 use std::{hash::Hash, marker::PhantomData, sync::Arc, time::Duration};
 
-use wincode::{SchemaRead, SchemaWrite};
+use twox_hash::{
+    XxHash3_128,
+    xxhash3_128::{DEFAULT_SECRET_LENGTH, RawHasher, SecretBuffer},
+};
+use wincode::{
+    SchemaRead, SchemaWrite,
+    io::{WriteResult, Writer},
+};
 
 use crate::{
     Result,
@@ -25,29 +32,39 @@ use crate::{
 /// the same thing; a build counter alone would make unchanged inputs look different every time.
 /// This identifies external data. Ajika separately assigns versions to computed query answers.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, SchemaRead, SchemaWrite)]
-pub struct Stamp([u8; 32]);
+pub struct Stamp([u8; 16]);
 
 impl Stamp {
-    /// Hash the actual captured bytes, for example the source text captured by an initializer.
+    /// Hash the actual captured bytes with XXH3-128, for example the source text captured by
+    /// an initializer. The stamp uses the digest's canonical big-endian bytes.
     pub fn of(bytes: &[u8]) -> Self {
-        Self(*blake3::hash(bytes).as_bytes())
+        Self(XxHash3_128::oneshot(bytes).to_be_bytes())
     }
 
     /// Hash a structured input, such as compiler options, using its serialized representation.
     /// Unordered containers should be normalized first when reproducible reuse matters.
     /// Serialization streams into the hash without allocating an encoded copy of the value.
     pub fn of_value<T: Persist>(value: &T) -> Result<Self> {
-        let mut hasher = blake3::Hasher::new();
-        codec::encode_into(
-            wincode::io::std_write::WriteAdapter::new(&mut hasher),
-            value,
-        )?;
-        Ok(Self::from_bytes(*hasher.finalize().as_bytes()))
+        let mut writer = StampWriter(RawHasher::new(SecretBuffer::default()));
+        codec::encode_into(&mut writer, value)?;
+        Ok(Self(writer.0.finish_128().to_be_bytes()))
     }
 
-    /// Use an existing content fingerprint supplied by the host, without hashing it again.
-    pub fn from_bytes(bytes: [u8; 32]) -> Self {
+    /// Use an existing 16-byte content fingerprint supplied by the host, without hashing it again.
+    /// For an XXH3-128 digest returned as a `u128`, pass `digest.to_be_bytes()` to match [`Self::of`].
+    pub fn from_bytes(bytes: [u8; 16]) -> Self {
         Self(bytes)
+    }
+}
+
+// Feed each encoded field into XXH3. The hasher borrows the default secret and keeps its
+// streaming buffer on the stack, including when the input value is large.
+struct StampWriter(RawHasher<&'static [u8; DEFAULT_SECRET_LENGTH]>);
+
+impl Writer for StampWriter {
+    fn write(&mut self, bytes: &[u8]) -> WriteResult<()> {
+        self.0.write(bytes);
+        Ok(())
     }
 }
 

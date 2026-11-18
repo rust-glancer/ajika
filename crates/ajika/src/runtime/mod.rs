@@ -35,7 +35,7 @@ pub(crate) mod value;
 
 use self::{
     backend::Backend,
-    cache::{Memo, Memos},
+    cache::{Memo, MemoTables},
     frame::Frame,
     record::QueryId,
     registry::Registry,
@@ -127,8 +127,8 @@ impl<S: Services> Database<S> {
         Self {
             inputs,
             services,
+            registry: Registry::linked(&backend.interner),
             backend,
-            registry: Registry::linked(),
             revision: 1,
             changed_at: [1; 3],
             cancellation: Cancellation::default(),
@@ -482,7 +482,7 @@ struct Operation<'db, S: Services> {
     // Global to this process, so events from different databases cannot share an operation ID.
     id: u64,
     database: &'db Database<S>,
-    memos: Memos,
+    memos: MemoTables,
     touched: Mutex<HashMap<QueryId, Arc<Memo>>>,
     statistics: Mutex<Statistics>,
     spare: AtomicUsize,
@@ -495,7 +495,7 @@ impl<'db, S: Services> Operation<'db, S> {
         Self {
             id: NEXT_OPERATION.fetch_add(1, Ordering::Relaxed),
             database,
-            memos: Memos::default(),
+            memos: MemoTables::default(),
             touched: Mutex::default(),
             statistics: Mutex::new(statistics),
             spare: AtomicUsize::new(database.parallelism - 1),

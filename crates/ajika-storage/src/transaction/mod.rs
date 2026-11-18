@@ -26,6 +26,10 @@ use crate::{
     value::INLINE_BYTES,
 };
 
+// How many open files we might want to have. This is a value that should be
+// sufficient for reasonably big projects, while still providing a bound.
+const MAX_CACHED_PACK_HANDLES: usize = 64;
+
 // Reconciliation can change the available bytes, so choose the kind of limit here
 // and calculate the budget after refreshing disk usage under the write lock.
 enum WriteMode {
@@ -342,7 +346,7 @@ impl<'a> Read<'a> {
                         file.clone()
                     } else {
                         let file = Arc::new(self.database.open_pack(&pack)?);
-                        if files.len() == 16 {
+                        if files.len() == MAX_CACHED_PACK_HANDLES {
                             files.remove(0);
                         }
                         files.push((pack, file.clone()));

@@ -21,7 +21,7 @@ use ajika_storage::Database as StorageDatabase;
 
 use super::{
     cache::Memo,
-    record::{Address, QueryId, Record, RecordHeader, Slot, ValueId},
+    record::{QueryId, Record, RecordHeader, Slot, ValueId},
     value::{Codec, Value},
 };
 use crate::{DatabaseOptions, Error, Lifetime, Result, Retention, Statistics, codec};
@@ -121,7 +121,7 @@ impl DiskChanges {
         if let Some(previous) = original {
             for (slot, value) in &previous.header.values {
                 if !record.header.values.contains_key(slot) && value.length.is_some() {
-                    self.removed_values.push(record.address.value_id(slot));
+                    self.removed_values.push(id.value_id(slot));
                 }
             }
         }
@@ -146,7 +146,7 @@ impl DiskChanges {
                 };
                 output.length = Some(length);
                 self.payloads.push(PendingValue {
-                    id: record.address.value_id(slot),
+                    id: id.value_id(slot),
                     value: value.clone(),
                     length,
                 });
@@ -268,7 +268,7 @@ impl Backend {
         // The runtime's record schema has its own version, separate from the storage
         // adapter and the application's persisted query types.
         let mut database =
-            StorageDatabase::open(path, &format!("query-runtime-3:{epoch}"), options.storage)?;
+            StorageDatabase::open(path, &format!("query-runtime-4:{epoch}"), options.storage)?;
         let (interner, usage) = match Self::load_interner(&mut database) {
             Ok(interner) => {
                 let loaded = Self::load_usage(&database);
@@ -556,7 +556,7 @@ impl Backend {
     /// decides whether to run the query. The flag tells it whether to count a disk read.
     pub(crate) fn value(
         &self,
-        address: &Address,
+        id: &QueryId,
         header: &RecordHeader,
         slot: &Slot,
         codec: Codec,
@@ -566,13 +566,12 @@ impl Backend {
         if header.lifetime == Lifetime::Operation {
             return Ok(None);
         }
-        let id = address.id();
         if let Some(value) = self
             .session
             .lock()
             .expect("session storage")
-            .value(&id, header, slot)
-            .or_else(|| self.pending()?.value(&id, header, slot))
+            .value(id, header, slot)
+            .or_else(|| self.pending()?.value(id, header, slot))
         {
             return Ok(Some((value, false)));
         }
@@ -580,7 +579,7 @@ impl Backend {
             Store::Memory(store) => Ok(store
                 .lock()
                 .expect("memory storage")
-                .get(&id)
+                .get(id)
                 .filter(|stored| {
                     stored.record.header.values.get(slot).map(|v| v.version)
                         == header.values.get(slot).map(|v| v.version)
@@ -596,7 +595,7 @@ impl Backend {
                 let bytes = self.observe(
                     database
                         .snapshot()
-                        .and_then(|read| read.read_value(&address.value_id(slot).0, length))
+                        .and_then(|read| read.read_value(&id.value_id(slot).0, length))
                         .map_err(Error::from),
                 )?;
                 check()?;
@@ -615,7 +614,8 @@ impl Backend {
 
     /// Use the revision from the same entry that supplies the record. A result for an
     /// edited file cannot inherit the saved file's validation just because the query key matches.
-    pub(crate) fn verified(&self, id: &QueryId) -> u64 {
+    /// `None` means the record is absent. `Some(0)` means it exists and still needs validation.
+    pub(crate) fn verified(&self, id: &QueryId) -> Option<u64> {
         if let Some(revision) = self
             .session
             .lock()
@@ -623,13 +623,13 @@ impl Backend {
             .verified(id)
             .or_else(|| self.pending()?.verified(id))
         {
-            return revision;
+            return Some(revision);
         }
         self.usage
             .lock()
             .expect("storage usage")
             .get(id)
-            .map_or(0, |entry| entry.verified)
+            .map(|entry| entry.verified)
     }
 
     /// Publish proofs only after their records have survived checkpointing and cancellation.
@@ -1069,7 +1069,7 @@ impl Backend {
                             if removed.contains(id) {
                                 for (slot, value) in &record.header.values {
                                     if value.length.is_some() {
-                                        write.remove_value(&record.address.value_id(slot).0)?;
+                                        write.remove_value(&id.value_id(slot).0)?;
                                     }
                                 }
                                 write.remove_metadata(&id.0)?;
