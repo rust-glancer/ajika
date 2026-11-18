@@ -27,7 +27,7 @@ pub use self::{
 };
 
 /// A caller-assigned value or record address. Replacing bytes preserves this identity.
-pub type Id = [u8; 32];
+pub type Id = [u8; 16];
 
 #[cfg(test)]
 mod tests;

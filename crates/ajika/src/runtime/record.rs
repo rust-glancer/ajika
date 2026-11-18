@@ -7,17 +7,40 @@
 
 use std::{collections::BTreeMap, sync::Arc};
 
+use ajika_storage::Id;
+use twox_hash::xxhash3_128::{RawHasher, SecretBuffer};
 use wincode::{SchemaRead, SchemaWrite};
 
 use crate::{Durability, Lifetime, Persist, Result, Stamp, codec, interner::FamilyId};
 
 /// Identifies one query call across recomputations. Its metadata uses this key in storage.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash)]
-pub(crate) struct QueryId(pub(crate) [u8; 32]);
+pub(crate) struct QueryId(pub(crate) Id);
+
+impl QueryId {
+    /// The primary payload can share the query's ID because metadata and payloads have
+    /// separate tables. Each named slot needs its own key in the payload table.
+    pub(crate) fn value_id(self, slot: &Slot) -> ValueId {
+        match slot {
+            None => ValueId(self.0),
+            Some(slot) => ValueId(storage_id(b"output", &self.0, slot)),
+        }
+    }
+}
 
 /// Identifies one output's payload. Replacing its value reuses the same storage key.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
-pub(crate) struct ValueId(pub(crate) [u8; 32]);
+pub(crate) struct ValueId(pub(crate) Id);
+
+// Tag each kind of address so a query key cannot encode the same byte sequence as a
+// named output. Within each kind the prefix has a fixed width (family ID or producer ID).
+fn storage_id(tag: &[u8], prefix: &[u8], key: &[u8]) -> Id {
+    let mut hash = RawHasher::new(SecretBuffer::default());
+    hash.write(tag);
+    hash.write(prefix);
+    hash.write(key);
+    hash.finish_128().to_be_bytes()
+}
 
 /// Identifies an answer that consumers may continue to treat as equal.
 /// If a child recomputes to the same value, it keeps this token and its parents can reuse their
@@ -55,28 +78,11 @@ impl Address {
     /// identity, not its answer, so recomputation replaces the existing record rather than
     /// accumulating a separate historical entry for every result.
     pub(crate) fn id(&self) -> QueryId {
-        let mut hash = blake3::Hasher::new();
-        hash.update(&self.family.0.to_le_bytes());
-        hash.update(&self.key);
-        QueryId(*hash.finalize().as_bytes())
-    }
-
-    /// Give each emitted value its own block address. All slots still belong to this query call,
-    /// but storage can read or replace one payload without reading or replacing its siblings.
-    pub(crate) fn value_id(&self, slot: &Slot) -> ValueId {
-        let id = self.id();
-        match slot {
-            // Metadata and payloads have separate storage tables, so the ordinary return
-            // value can reuse the call's bytes while keeping a distinct identity type.
-            None => ValueId(id.0),
-            Some(slot) => {
-                let mut hash = blake3::Hasher::new();
-                hash.update(&id.0);
-                hash.update(b"output");
-                hash.update(slot);
-                ValueId(*hash.finalize().as_bytes())
-            }
-        }
+        QueryId(storage_id(
+            b"query",
+            &self.family.0.to_le_bytes(),
+            &self.key,
+        ))
     }
 }
 

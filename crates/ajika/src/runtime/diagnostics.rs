@@ -6,6 +6,8 @@
 
 use std::fmt;
 
+use twox_hash::XxHash3_128;
+
 use super::{
     Operation,
     evaluate::{OutputOutcome, ReuseReason},
@@ -40,7 +42,10 @@ impl SlotLabel {
             return Self("<opaque>".to_owned());
         };
         Self(match key {
-            Some(key) => format!("{name}#{}", Hex(&blake3::hash(&key).as_bytes()[..4])),
+            Some(key) => format!(
+                "{name}#{}",
+                Hex(&XxHash3_128::oneshot(&key).to_be_bytes()[..4])
+            ),
             None => name,
         })
     }
@@ -70,7 +75,7 @@ impl<S: Services> Operation<'_, S> {
             tracing::trace!(target: TARGET,
                 op = self.id, revision = self.database.revision,
                 query = %self.database.registry.family_name(address.family), call = %Hex(&id.0[..4]), call_id = %Hex(&id.0),
-                output = output.0, output_id = %Hex(&address.value_id(slot).0),
+                output = output.0, output_id = %Hex(&id.value_id(slot).0),
                 reason, "reuse");
         }
     }
@@ -94,7 +99,7 @@ impl<S: Services> Operation<'_, S> {
                 query = %self.database.registry.family_name(parent.family), call = %Hex(&id.0[..4]), call_id = %Hex(&id.0),
                 dependency = %self.database.registry.family_name(address.family), dependency_call = %Hex(&child.0[..4]),
                 dependency_id = %Hex(&child.0), dependency_kind = kind,
-                output = output.0, output_id = %Hex(&address.value_id(slot).0),
+                output = output.0, output_id = %Hex(&child.value_id(slot).0),
                 reason, "invalidated");
         }
     }
@@ -116,7 +121,7 @@ impl<S: Services> Operation<'_, S> {
             tracing::trace!(target: TARGET,
                 op = self.id, revision = self.database.revision,
                 query = %self.database.registry.family_name(address.family), call = %Hex(&id.0[..4]), call_id = %Hex(&id.0),
-                output = output.0, output_id = %Hex(&address.value_id(slot).0),
+                output = output.0, output_id = %Hex(&id.value_id(slot).0),
                 result, evidence, version, "output");
         }
     }

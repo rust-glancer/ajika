@@ -248,8 +248,7 @@ impl<'db, S: Services> Db<'db, S> {
                 }
                 .into());
             }
-            let Some(value) = self.load(&memo.address, &header, slot, Codec::of::<T>(), false)?
-            else {
+            let Some(value) = self.load(memo, &header, slot, Codec::of::<T>(), false)? else {
                 return Ok(None);
             };
             let result = value.typed()?;
@@ -410,7 +409,7 @@ impl<'db, S: Services> Db<'db, S> {
                 }
                 if let Some(codec) = Q::storage().codec {
                     let current = memo.lock().header.clone().expect("verified header");
-                    if let Some(value) = self.load(&memo.address, &current, &None, codec, false)? {
+                    if let Some(value) = self.load(&memo, &current, &None, codec, false)? {
                         Q::validate(value.typed::<Q::Value>()?.as_ref())?;
                         memo.lock().values.insert(None, value);
                         self.operation.stats().hits += 1;
@@ -605,7 +604,7 @@ impl<'db, S: Services> Db<'db, S> {
                 let resident = memo.lock().values.get(slot).cloned();
                 let old_value = match resident {
                     Some(value) => Some(value),
-                    None => self.load(&previous.address, &previous.header, slot, codec, true)?,
+                    None => self.load(memo, &previous.header, slot, codec, true)?,
                 };
                 if let Some(old) = old_value {
                     let _span = tracing::trace_span!("ajika.compare", query = Q::NAME).entered();
@@ -682,23 +681,23 @@ impl<'db, S: Services> Db<'db, S> {
     }
 
     /// Fetch one stored payload for reuse or for comparison with a newly computed answer.
-    /// The header supplies its encoded length; the address and slot locate it. Returning None
+    /// The header supplies its encoded length; the memo's ID and slot locate it. Returning None
     /// means the backend has no retained payload described by this header. The caller decides
     /// whether to recompute. This step accounts for decoding cost but does not decide validity
     /// or record a dependency.
     fn load(
         &self,
-        address: &Address,
+        memo: &Memo,
         header: &RecordHeader,
         slot: &Slot,
         codec: Codec,
         comparison: bool,
     ) -> Result<Option<Value>> {
         let database = self.operation.database;
-        let _span = tracing::trace_span!("ajika.load", query = %database.registry.family_name(address.family)).entered();
+        let _span = tracing::trace_span!("ajika.load", query = memo.query_name).entered();
         let value = database
             .backend
-            .value(address, header, slot, codec, &|| self.check_cancelled())?;
+            .value(&memo.id, header, slot, codec, &|| self.check_cancelled())?;
         if value.as_ref().is_some_and(|(_, decoded)| *decoded) {
             let mut statistics = self.operation.stats();
             statistics.decoded += 1;

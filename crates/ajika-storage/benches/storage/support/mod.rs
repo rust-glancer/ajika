@@ -1,7 +1,8 @@
 use std::fmt;
 
-use ajika_storage::{Compression, Database, Options, Result};
+use ajika_storage::{Compression, Database, Id, Options, Result};
 use divan::{Bencher, black_box};
+use twox_hash::XxHash3_128;
 
 #[derive(Clone, Copy)]
 pub(crate) enum Payload {
@@ -19,14 +20,11 @@ impl Payload {
             Self::Large => 1024 * 1024,
         };
         if matches!(self, Self::Opaque) {
-            // A fixed hash stream gives reproducible, poorly compressible bytes without a
-            // random generator dependency or entropy acquisition in benchmark preparation.
-            let mut bytes = vec![0; length];
-            blake3::Hasher::new()
-                .update(b"ajika benchmark payload")
-                .finalize_xof()
-                .fill(&mut bytes);
-            bytes
+            // Hash successive block numbers for reproducible, poorly compressible bytes.
+            (0u64..)
+                .flat_map(|block| XxHash3_128::oneshot(&block.to_le_bytes()).to_be_bytes())
+                .take(length)
+                .collect()
         } else {
             // Names and repeated structure approximate serialized analysis data better than
             // an all-zero buffer, which would make compression unrealistically inexpensive.
@@ -184,10 +182,8 @@ impl Fixture {
         fixture
     }
 
-    pub(crate) fn id(index: u32) -> [u8; 32] {
-        let mut id = [0; 32];
-        id[..4].copy_from_slice(&index.to_le_bytes());
-        id
+    pub(crate) fn id(index: u32) -> Id {
+        u128::from(index).to_le_bytes()
     }
 
     // As in the runtime suite, validate a separate rehearsal and exclude fixture destruction.

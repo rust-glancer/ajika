@@ -16,7 +16,7 @@ families combined.
 
 ## The same question can have a new answer
 
-The storage ID is a 32-byte hash of that address. It identifies the question, not
+The storage ID is a hash of that address. It identifies the question, not
 the answer's contents. Changing the file replaces work at the same logical address
 instead of creating a new historical entry for every text version.
 

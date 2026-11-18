@@ -19,9 +19,9 @@ fn published_values_round_trip_in_each_encoding() -> Result<()> {
         let mut write = database.begin_write()?;
         write.set_identity("files", 0, b"src/lib.rs")?;
         for (id, value) in values.iter().enumerate() {
-            write.write_value(&[id as u8; 32], compression.encode(value.clone())?)?;
+            write.write_value(&[id as u8; 16], compression.encode(value.clone())?)?;
         }
-        write.set_metadata(&[1; 32], b"complete output list")?;
+        write.set_metadata(&[1; 16], b"complete output list")?;
         write.commit()?;
         let stats = database.statistics()?;
         assert_eq!(stats.values, 3);
@@ -38,12 +38,12 @@ fn published_values_round_trip_in_each_encoding() -> Result<()> {
             vec![("files".to_owned(), 0, b"src/lib.rs".to_vec())]
         );
         assert_eq!(
-            read.metadata(&[1; 32])?.as_deref(),
+            read.metadata(&[1; 16])?.as_deref(),
             Some(b"complete output list".as_slice())
         );
         for (id, value) in values.iter().enumerate() {
             assert_eq!(
-                read.read_value(&[id as u8; 32], value.len() as u64)?,
+                read.read_value(&[id as u8; 16], value.len() as u64)?,
                 *value
             );
         }
@@ -58,16 +58,16 @@ fn only_committed_replacements_become_visible() -> Result<()> {
     let old = vec![1; 32_000];
     let new = vec![2; 64_000];
     let mut write = database.begin_write()?;
-    write.write_value(&[1; 32], Compression::None.encode(old.clone())?)?;
+    write.write_value(&[1; 16], Compression::None.encode(old.clone())?)?;
     write.commit()?;
 
     let mut pending = database.begin_write()?;
-    pending.write_value(&[1; 32], Compression::Lz4.encode(new.clone())?)?;
+    pending.write_value(&[1; 16], Compression::Lz4.encode(new.clone())?)?;
     drop(pending);
     assert_eq!(
         database
             .snapshot()?
-            .read_value(&[1; 32], old.len() as u64)?,
+            .read_value(&[1; 16], old.len() as u64)?,
         old
     );
     assert_eq!(
@@ -77,12 +77,12 @@ fn only_committed_replacements_become_visible() -> Result<()> {
     );
 
     let mut write = database.begin_write()?;
-    write.write_value(&[1; 32], Compression::Lz4.encode(new.clone())?)?;
+    write.write_value(&[1; 16], Compression::Lz4.encode(new.clone())?)?;
     write.commit()?;
     assert_eq!(
         database
             .snapshot()?
-            .read_value(&[1; 32], new.len() as u64)?,
+            .read_value(&[1; 16], new.len() as u64)?,
         new
     );
     assert_eq!(
@@ -113,29 +113,29 @@ fn replacing_values_and_aborting_writes_reuses_the_physical_budget() -> Result<(
     for byte in 0..16 {
         let mut write = database.begin_write()?;
         write.write_value(
-            &[1; 32],
+            &[1; 16],
             Compression::None.encode(vec![byte; 4 * 1024 * 1024])?,
         )?;
         write.commit()?;
 
         let mut pending = database.begin_write()?;
         pending.write_value(
-            &[2; 32],
+            &[2; 16],
             Compression::None.encode(vec![42; 4 * 1024 * 1024])?,
         )?;
         drop(pending);
 
         let write = database.begin_write()?;
-        write.set_metadata(&[1; 32], &[byte])?;
+        write.set_metadata(&[1; 16], &[byte])?;
         write.commit()?;
     }
     let stats = database.statistics()?;
     assert_eq!((stats.values, stats.pack_files), (1, 1));
     assert_eq!(
-        database.snapshot()?.read_value(&[1; 32], 4 * 1024 * 1024)?,
+        database.snapshot()?.read_value(&[1; 16], 4 * 1024 * 1024)?,
         vec![15; 4 * 1024 * 1024]
     );
-    assert_eq!(database.snapshot()?.metadata(&[1; 32])?, Some(vec![15]));
+    assert_eq!(database.snapshot()?.metadata(&[1; 16])?, Some(vec![15]));
     Ok(())
 }
 
@@ -144,15 +144,15 @@ fn replacing_a_pending_value_inline_retires_its_new_pack() -> Result<()> {
     let root = tempfile::tempdir()?;
     let database = Database::open(root.path(), "fixture", Options::default())?;
     let mut write = database.begin_write()?;
-    write.write_value(&[1; 32], Compression::None.encode(vec![42; 32_000])?)?;
+    write.write_value(&[1; 16], Compression::None.encode(vec![42; 32_000])?)?;
     write.write_value(
-        &[1; 32],
+        &[1; 16],
         Compression::None.encode(b"small replacement".to_vec())?,
     )?;
     write.commit()?;
     assert_eq!(database.statistics()?.pack_files, 0);
     assert_eq!(
-        database.snapshot()?.read_value(&[1; 32], 17)?,
+        database.snapshot()?.read_value(&[1; 16], 17)?,
         b"small replacement"
     );
     Ok(())
@@ -166,13 +166,13 @@ fn removing_neighbors_keeps_live_frames_until_the_pack_is_empty() -> Result<()> 
     let mut write = database.begin_write()?;
     write.set_identity("files", 0, b"src/lib.rs")?;
     for id in [1, 2] {
-        write.write_value(&[id; 32], Compression::None.encode(value.clone())?)?;
+        write.write_value(&[id; 16], Compression::None.encode(value.clone())?)?;
     }
     write.commit()?;
     let mut write = database.begin_write()?;
-    write.remove_value(&[1; 32])?;
+    write.remove_value(&[1; 16])?;
     write.commit()?;
-    assert_eq!(database.snapshot()?.read_value(&[2; 32], 10_000)?, value);
+    assert_eq!(database.snapshot()?.read_value(&[2; 16], 10_000)?, value);
     assert!(database.statistics()?.dead_pack_bytes >= 10_000);
 
     database.invalidate()?;
@@ -197,12 +197,12 @@ fn compaction_resumes_after_restart_without_changing_values() -> Result<()> {
     let value = vec![42; 2 * 1024 * 1024];
     let mut write = database.begin_write()?;
     for id in 0..12 {
-        write.write_value(&[id; 32], Compression::None.encode(value.clone())?)?;
+        write.write_value(&[id; 16], Compression::None.encode(value.clone())?)?;
     }
     write.commit()?;
     let mut write = database.begin_write()?;
     for id in 0..4 {
-        write.remove_value(&[id; 32])?;
+        write.remove_value(&[id; 16])?;
     }
     write.commit()?;
 
@@ -223,7 +223,7 @@ fn compaction_resumes_after_restart_without_changing_values() -> Result<()> {
         assert_eq!(
             database
                 .snapshot()?
-                .read_value(&[id; 32], value.len() as u64)?,
+                .read_value(&[id; 16], value.len() as u64)?,
             value
         );
     }
@@ -238,11 +238,11 @@ fn relocation_preserves_compression_when_the_write_policy_changes() -> Result<()
         let value = b"some repeated query output\n".repeat(10_000);
         let mut write = database.begin_write()?;
         for id in [1, 2] {
-            write.write_value(&[id; 32], compression.encode(value.clone())?)?;
+            write.write_value(&[id; 16], compression.encode(value.clone())?)?;
         }
         write.commit()?;
         let mut write = database.begin_write()?;
-        write.remove_value(&[1; 32])?;
+        write.remove_value(&[1; 16])?;
         write.commit()?;
         let live_bytes = database.statistics()?.packed_value_bytes;
         database.set_compression(Compression::None);
@@ -256,7 +256,7 @@ fn relocation_preserves_compression_when_the_write_policy_changes() -> Result<()
         assert_eq!(
             database
                 .snapshot()?
-                .read_value(&[2; 32], value.len() as u64)?,
+                .read_value(&[2; 16], value.len() as u64)?,
             value
         );
     }
@@ -272,7 +272,7 @@ fn small_writes_consolidate_and_repeated_replacements_settle() -> Result<()> {
     for turn in 0..3 * KEYS {
         let id = turn % KEYS;
         let mut write = database.begin_write()?;
-        write.write_value(&[id; 32], Compression::None.encode(vec![turn; 16 * 1024])?)?;
+        write.write_value(&[id; 16], Compression::None.encode(vec![turn; 16 * 1024])?)?;
         write.commit()?;
         database.maintain()?;
         peak_files = peak_files.max(database.statistics()?.pack_files);
@@ -292,7 +292,7 @@ fn small_writes_consolidate_and_repeated_replacements_settle() -> Result<()> {
     let read = database.snapshot()?;
     for id in 0..KEYS {
         assert_eq!(
-            read.read_value(&[id; 32], 16 * 1024)?,
+            read.read_value(&[id; 16], 16 * 1024)?,
             vec![2 * KEYS + id; 16 * 1024]
         );
     }
@@ -305,7 +305,7 @@ fn an_exhausted_budget_still_allows_reclamation_and_reads() -> Result<()> {
     let database = Database::open(root.path(), "fixture", Options::default())?;
     let mut write = database.begin_write()?;
     for id in [1, 2] {
-        write.write_value(&[id; 32], Compression::None.encode(vec![id; 32_000])?)?;
+        write.write_value(&[id; 16], Compression::None.encode(vec![id; 32_000])?)?;
     }
     write.commit()?;
     drop(database);
@@ -321,19 +321,19 @@ fn an_exhausted_budget_still_allows_reclamation_and_reads() -> Result<()> {
     let mut pending = database.begin_write()?;
     assert_eq!(
         pending
-            .write_value(&[3; 32], Compression::None.encode(vec![3; 32_000])?)
+            .write_value(&[3; 16], Compression::None.encode(vec![3; 32_000])?)
             .expect_err("new values exceed the budget")
             .kind(),
         crate::ErrorKind::Capacity
     );
     drop(pending);
     let mut write = database.begin_write()?;
-    write.remove_value(&[1; 32])?;
+    write.remove_value(&[1; 16])?;
     write.commit()?;
     database.compact()?;
     assert_eq!(database.statistics()?.dead_pack_bytes, 0);
     assert_eq!(
-        database.snapshot()?.read_value(&[2; 32], 32_000)?,
+        database.snapshot()?.read_value(&[2; 16], 32_000)?,
         vec![2; 32_000]
     );
     Ok(())
@@ -345,8 +345,8 @@ fn abrupt_exit_keeps_a_complete_published_checkpoint() -> Result<()> {
         let root = tempfile::tempdir()?;
         let database = Database::open(root.path(), "fixture", Options::default())?;
         let mut write = database.begin_write()?;
-        write.write_value(&[1; 32], Compression::Lz4.encode(vec![1; 32_000])?)?;
-        write.set_metadata(&[1; 32], b"old")?;
+        write.write_value(&[1; 16], Compression::Lz4.encode(vec![1; 32_000])?)?;
+        write.set_metadata(&[1; 16], b"old")?;
         write.commit()?;
         drop(database);
 
@@ -363,11 +363,11 @@ fn abrupt_exit_keeps_a_complete_published_checkpoint() -> Result<()> {
         let database = Database::open(root.path(), "fixture", Options::default())?;
         let read = database.snapshot()?;
         assert_eq!(
-            read.read_value(&[1; 32], 32_000)?,
+            read.read_value(&[1; 16], 32_000)?,
             vec![if published { 2 } else { 1 }; 32_000]
         );
         assert_eq!(
-            read.metadata(&[1; 32])?.as_deref(),
+            read.metadata(&[1; 16])?.as_deref(),
             Some(if published { b"new" } else { b"old" }.as_slice())
         );
         assert_eq!(
@@ -385,8 +385,8 @@ fn interrupted_storage_worker() -> Result<()> {
     let root = std::env::var_os("AJIKA_TEST_STORAGE").expect("parent supplies storage path");
     let database = Database::open(std::path::Path::new(&root), "fixture", Options::default())?;
     let mut write = database.begin_write()?;
-    write.write_value(&[1; 32], Compression::Zstd.encode(vec![2; 32_000])?)?;
-    write.set_metadata(&[1; 32], b"new")?;
+    write.write_value(&[1; 16], Compression::Zstd.encode(vec![2; 32_000])?)?;
+    write.set_metadata(&[1; 16], b"new")?;
     if std::env::var("AJIKA_TEST_PUBLISHED")?.as_str() == "yes" {
         write.commit()?;
     } else {
@@ -401,7 +401,7 @@ fn reloading_a_stopped_owner_keeps_its_checkpoint_and_lock() -> Result<()> {
     let root = tempfile::tempdir()?;
     let mut database = Database::open(root.path(), "fixture", Options::default())?;
     let write = database.begin_write()?;
-    write.set_metadata(&[1; 32], b"complete checkpoint")?;
+    write.set_metadata(&[1; 16], b"complete checkpoint")?;
     write.commit()?;
 
     // Model the state after an uncertain commit. The published catalog remains on disk.
@@ -410,7 +410,7 @@ fn reloading_a_stopped_owner_keeps_its_checkpoint_and_lock() -> Result<()> {
         .store(false, std::sync::atomic::Ordering::Release);
     database.reopen()?;
     assert_eq!(
-        database.snapshot()?.metadata(&[1; 32])?.as_deref(),
+        database.snapshot()?.metadata(&[1; 16])?.as_deref(),
         Some(b"complete checkpoint".as_slice())
     );
     assert!(matches!(
@@ -427,10 +427,10 @@ fn opening_rebuilds_a_damaged_index() -> Result<()> {
 
     let database = Database::open(root.path(), "fixture", Options::default())?;
     let write = database.begin_write()?;
-    write.set_metadata(&[1; 32], b"rebuilt checkpoint")?;
+    write.set_metadata(&[1; 16], b"rebuilt checkpoint")?;
     write.commit()?;
     assert_eq!(
-        database.snapshot()?.metadata(&[1; 32])?.as_deref(),
+        database.snapshot()?.metadata(&[1; 16])?.as_deref(),
         Some(b"rebuilt checkpoint".as_slice())
     );
     Ok(())
