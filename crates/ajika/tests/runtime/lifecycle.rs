@@ -452,7 +452,7 @@ fn pending_byte_limit_writes_an_oversized_operation_before_returning() -> Result
     assert_eq!(stats.stored_queries, 3);
     assert_eq!(stats.metadata_writes, 3);
 
-    // A pressure drain commits the batch even if the host closes before the next collect.
+    // Crossing the byte limit must make these results reusable after restart, even without collect().
     drop(db);
     let mut db = Database::open(directory.path(), "test", inputs, (), options)?;
     db.run(|db| symbols(db, 1))?;
@@ -542,7 +542,7 @@ fn deferred_checkpoints_can_free_disk_space_before_retrying() -> Result<()> {
 fn collection_can_trim_pending_work_to_fit_on_disk() -> Result<()> {
     let directory = tempfile::tempdir()?;
     let options = DatabaseOptions::new(Retention {
-        max_entries: 1,
+        max_bytes: 6 * 1024 * 1024,
         ..retention()
     })
     .compression(ajika::Compression::None)

@@ -28,7 +28,7 @@ boundaries, but may also expose an expensive producer that could be split.
 These are not wall-clock timings or exact RSS measurements. `bytes_written`
 counts encoded payload bytes, even if the final commit fails. Metadata-only
 updates can still happen when it is zero. The
-[`Statistics` fields](https://github.com/rust-glancer/ajika/blob/main/crates/ajika/src/model/mod.rs#L77) specify the individual accounting rules.
+[`Statistics` fields](https://github.com/rust-glancer/ajika/blob/main/crates/ajika/src/model/mod.rs#L78) specify the individual accounting rules.
 
 ## Ask why a particular call ran
 

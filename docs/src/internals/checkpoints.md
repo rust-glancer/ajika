@@ -9,7 +9,7 @@ successfully, scoped workers have finished, and cancellation has been checked.
 
 ## Decide what can survive
 
-[`Backend::checkpoint`](https://github.com/rust-glancer/ajika/blob/main/crates/ajika/src/runtime/backend/mod.rs#L648) gathers memos marked dirty: they have record or payload
+[`Backend::checkpoint`](https://github.com/rust-glancer/ajika/blob/main/crates/ajika/src/runtime/backend/mod.rs#L714) gathers memos marked dirty: they have record or payload
 changes for checkpointing to handle. It prepares replacements for retained work.
 The query's inherited lifetime determines where Ajika can keep the record and
 its values:
@@ -59,19 +59,18 @@ the durable transaction.
 
 ## Session work overlays the saved baseline
 
-A session record contains the producer's complete output metadata and dependency
-list. Its changed persistent-policy payloads remain typed values in memory.
-Equal durable payloads can be read from their saved locations instead of being
-duplicated in the session store. With deferred writes, reads look in the session
-store first, then the pending record, then disk. A draft that reuses a pending
-value keeps its own reference so it can still read it after collection.
+Consider the body outputs A and B from the [output chapter](outputs.md). An
+editor opens the saved file, then makes an unsaved edit that deletes B and
+leaves A unchanged. The query result for the edited text goes in the session
+store. Its record lists only A. Looking up B in the saved record would make
+the deleted output visible again.
 
-Consider the body outputs A and B from the [output chapter](outputs.md). If an
-unsaved edit deletes B, the session record must list only A. Falling through to
-the saved output metadata would incorrectly make B visible again. A surviving
-slot such as A can still use its saved payload when the versions match.
+A kept its version, so the session only needs its metadata. If the saved result
+is waiting for a write, the next request reads A from that pending result.
+After commit, the same session record gives the length needed to read A from
+disk. Only the edited outputs count toward the session's payload budget.
 
-An operation containing only session changes does not open a durable writer.
+Keeping a session result between requests requires no disk write.
 If the host later saves that exact draft, it publishes the same input content
 with persistent lifetime. Validation can reuse the session answer, and
 checkpointing promotes its retained data without rerunning the query.

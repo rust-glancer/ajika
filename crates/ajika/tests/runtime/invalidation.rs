@@ -312,12 +312,43 @@ fn deferred_output_removal_hides_the_disk_slot_until_collection_reclaims_it() ->
     );
 
     db.collect()?;
-    // The producer and consumer both survived. Only the optional slot lost its backing.
+    // Collection deletes the old output from disk. The next request can still reuse both queries.
     assert_eq!(
         db.storage_statistics()?.expect("disk database").values,
         before - 1
     );
     assert_eq!(*db.run(optional_length)?, 0);
+    assert_eq!(db.statistics().executed, 0);
+    Ok(())
+}
+
+#[derive(wincode::SchemaRead, wincode::SchemaWrite)]
+struct Label(String);
+
+impl PartialEq for Label {
+    fn eq(&self, other: &Self) -> bool {
+        self.0.trim() == other.0.trim()
+    }
+}
+
+#[ajika::query]
+fn label(db: &Db) -> ajika::Result<Label> {
+    Ok(Label(Settings::at(()).text(db)?.as_ref().clone()))
+}
+
+#[test]
+fn equal_pending_values_can_have_different_encoded_lengths() -> Result<()> {
+    let directory = tempfile::tempdir()?;
+    let options = test_options().defer_checkpoints(1024 * 1024);
+    let mut db = Database::open(directory.path(), "test", inputs("one"), (), options.clone())?;
+    db.run(label)?;
+    db.replace_inputs(inputs(" one "));
+    db.run(label)?;
+    assert_eq!(db.statistics().unchanged, 1);
+    db.collect()?;
+    drop(db);
+    let mut db = Database::open(directory.path(), "test", inputs(" one "), (), options)?;
+    assert_eq!(db.run(label)?.0.trim(), "one");
     assert_eq!(db.statistics().executed, 0);
     Ok(())
 }

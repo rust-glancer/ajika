@@ -54,14 +54,14 @@ impl DatabaseOptions {
         self
     }
 
-    /// Keep completed persistent work in memory for later runs to reuse. Call
-    /// [`crate::Database::collect`] to write it at an idle boundary. Dropping the database
-    /// discards work still in memory.
+    /// Let a disk-backed `run` return before writing its persistent query results.
+    /// Later runs can reuse those results from RAM. Call [`crate::Database::collect`]
+    /// when the application is idle, or before closing to keep the results for a restart.
+    /// Dropping the database discards any writes still pending.
     ///
-    /// When pending records and their resident payloads exceed `max_pending_bytes`, the run
-    /// writes and synchronizes them before returning. If disk space is tight, it can evict
-    /// records eligible for collection first. The budget uses estimated encoded sizes.
-    /// Actual heap usage may differ, and a single operation can exceed the budget.
+    /// The caller does the writing. If a run takes the pending batch over `max_pending_bytes`,
+    /// it writes and synchronizes the batch before returning. It can evict eligible records
+    /// to make room on disk. The limit uses estimated encoded sizes, so heap usage can differ.
     pub fn defer_checkpoints(mut self, max_pending_bytes: u64) -> Self {
         self.max_pending_bytes = Some(max_pending_bytes);
         self

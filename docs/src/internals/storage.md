@@ -105,7 +105,7 @@ Between operations, the disk backend keeps compact usage entries: call ID,
 last-use time, logical size, and verified revision. It does not retain every
 query's encoded key, dependency vector, output metadata, and mutex.
 
-On reopening, [`Backend::open`](https://github.com/rust-glancer/ajika/blob/main/crates/ajika/src/runtime/backend/mod.rs#L202) rebuilds that inventory from
+On reopening, [`Backend::open`](https://github.com/rust-glancer/ajika/blob/main/crates/ajika/src/runtime/backend/mod.rs#L267) rebuilds that inventory from
 record metadata without decoding query payloads. Verified revisions begin at
 zero. Full records and headers are acquired into operation memos when needed.
 

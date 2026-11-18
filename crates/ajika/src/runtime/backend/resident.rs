@@ -1,5 +1,8 @@
-//! Session overrides and pending disk checkpoints hold complete query records in RAM.
-//! A record can reuse a payload from its baseline when both describe the same version.
+//! Two kinds of results can stay in RAM between runs. Think of an editor asking the
+//! same query about a saved file and then an unsaved edit (a draft). The saved result
+//! may be waiting for a disk write. The editor marks the unsaved text as a
+//! [`Session`](crate::Lifetime::Session) input so its result can be reused on the next
+//! keystroke. The backend keeps pending writes and session results in separate maps.
 
 use std::{
     collections::{BTreeMap, HashMap},
@@ -29,7 +32,8 @@ pub(super) struct ResidentStore {
 }
 
 impl ResidentStore {
-    /// The disk checkpoint uses the latest access time, including reads after the record was staged.
+    /// A query may have been read again while waiting for a disk write. Save that last
+    /// use so collection after a restart knows how recently the result was needed.
     pub(super) fn entries(&self) -> impl Iterator<Item = (QueryId, &Stored, u64)> {
         self.entries
             .iter()
@@ -66,8 +70,8 @@ impl ResidentStore {
         stored.values.get(slot).cloned()
     }
 
-    /// Fill slots absent from the operation (for example, a draft promoted by validation
-    /// alone). A value from a superseded version cannot back the new record.
+    /// An operation can reuse a query without reading all of its outputs. When building
+    /// its next record, carry over any missing values we already have for those versions.
     pub(super) fn fill_values(
         &self,
         id: &QueryId,
@@ -126,7 +130,7 @@ impl ResidentStore {
             return 0;
         }
         self.last_collection = now;
-        // Choose the oldest entries using a small list of IDs and timestamps.
+        // Sort IDs and timestamps so choosing what to evict doesn't copy the query results.
         let mut ordered = self
             .entries
             .iter()

@@ -221,8 +221,8 @@ impl<S: Services> Database<S> {
         self.session_retention = retention;
     }
 
-    /// Release editor-derived work while preserving the durable baseline. For example, a host
-    /// can trim it when the last edited buffer is discarded. Later demands validate or recompute.
+    /// Drop results computed from session inputs. For example, when an editor discards
+    /// its unsaved buffers, the database can still reuse results for the saved files.
     pub fn clear_session(&mut self) {
         self.backend.clear_session();
         (
@@ -258,9 +258,9 @@ impl<S: Services> Database<S> {
     ///
     /// The callback receives a [`Db`] for the current captured inputs. Query answers become usable
     /// by other queries as soon as they are computed. Once the callback and its scoped workers
-    /// finish successfully, a checkpoint publishes the operation's changes together. With
-    /// [`DatabaseOptions::defer_checkpoints`], pending persistent results remain resident until
-    /// collection or budget pressure. Ajika releases the rest of the operation's working state.
+    /// finish successfully, Ajika checkpoints their results for later runs. A disk database
+    /// normally writes persistent results before returning. [`DatabaseOptions::defer_checkpoints`]
+    /// lets them stay in RAM until [`collect`](Self::collect) or until the batch exceeds its budget.
     ///
     /// Failure before checkpointing discards this operation's work, including successful child queries.
     /// The host should reject inconsistent captured inputs before returning from the callback.
@@ -287,8 +287,8 @@ impl<S: Services> Database<S> {
             // first so an obsolete request leaves repair for the next one.
             self.check_cancelled()?;
             self.backend.recover()?;
-            // A previous pressure drain may have failed. Retry before accepting more
-            // work, so repeated storage failures cannot grow the resident batch indefinitely.
+            // If the previous run exceeded its budget and the disk write failed, its
+            // results are still in RAM. Retry before the callback can add more.
             if self.backend.pending_over_budget() {
                 self.drain_pending()?;
                 drained = true;
@@ -301,8 +301,8 @@ impl<S: Services> Database<S> {
             };
             let result = (|| {
                 db.check_cancelled()?;
-                // Providers can publish completed values to each other in memory. Nothing is
-                // written to disk until the host callback and all its scoped work have finished.
+                // Queries can share their answers while the callback runs. Saving this
+                // operation's work waits until the callback and its workers have finished.
                 let callback_result = work(&db);
                 // Cancellation means an answer is no longer needed, but must not conceal a
                 // failure that a provider already recorded. Preserve real callback errors so
@@ -323,8 +323,6 @@ impl<S: Services> Database<S> {
                     .values()
                     .cloned()
                     .collect::<Vec<_>>();
-                // The checkpoint writes the completed producers together, including new
-                // dependency lists for results whose payloads compared equal.
                 self.backend.checkpoint(
                     &memos,
                     operation.now,
@@ -335,15 +333,15 @@ impl<S: Services> Database<S> {
                 // A completed commit may survive this cancellation. It remains cache
                 // data with its actual input observations, not an accepted project.
                 db.check_cancelled()?;
-                // A proof describes the record that was actually accepted. Do not publish
-                // proofs for pending replacements when the callback or checkpoint fails.
+                // Future runs may skip validation for this input revision. Give them
+                // that shortcut only after the corresponding query records are in place.
                 self.backend.remember_verified(&memos);
                 Ok(value)
             })();
             frame.finish(&mut operation.stats());
             let statistics = *operation.stats();
-            // Release transient values and query frames before a pressure drain starts
-            // encoding the accepted batch. Late cancellation may follow a successful write.
+            // Encoding a large batch needs temporary buffers. Free the operation's
+            // working memory before allocating those buffers.
             drop(operation);
             self.statistics = statistics;
             let value = result?;
@@ -357,6 +355,8 @@ impl<S: Services> Database<S> {
         self.cancellation = Cancellation::default();
         match outcome {
             Ok(result) => {
+                // If disk writes are deferred, leave routine disk maintenance for
+                // collect() or a run that already had to write the pending results.
                 let maintain_disk = result.is_ok() && (!self.backend.is_deferred() || drained);
                 let maintenance = if maintain_disk
                     && (self.last_collection.elapsed() >= Duration::from_secs(60)
@@ -399,8 +399,8 @@ impl<S: Services> Database<S> {
         {
             Ok(()) => Ok(0),
             Err(error) if error.is_capacity() => {
-                // Old disk rows can occupy the space this batch needs, or the batch itself
-                // can exceed retention. Evict eligible entries and reclaim space before retrying.
+                // The disk may have room for the new result once an old one is evicted.
+                // Collection can also trim the pending batch itself before we retry.
                 let removed = self.collect_retained()?;
                 self.backend
                     .drain_pending(self.parallelism, &mut self.statistics)?;
@@ -422,14 +422,12 @@ impl<S: Services> Database<S> {
         Ok(())
     }
 
-    /// Apply retention limits to stored and session results. A later request can recompute an
-    /// evicted query and its outputs, including when needed by a retained query. Returns the
-    /// number of query records removed.
+    /// Apply retention limits and return the number of query records evicted.
+    /// A later request can recompute an evicted query and its outputs. Interned IDs remain valid.
     ///
-    /// With deferred checkpoints, call this at an idle boundary or before closing to persist
-    /// pending work. It commits the batch to disk and applies the retention limits before
-    /// returning. Under disk pressure it can evict old records first to make room.
-    /// Eager databases also collect periodically or when over budget. Interned IDs remain valid.
+    /// With deferred writes, call this when the application is idle or before closing
+    /// the database. It synchronizes pending results to disk and can evict old records
+    /// first if it needs space. Eager databases also collect periodically or when over budget.
     pub fn collect(&mut self) -> Result<usize> {
         let reclaimed = self.drain_pending()?;
         self.refresh_storage_statistics();

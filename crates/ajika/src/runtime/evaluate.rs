@@ -616,8 +616,8 @@ impl<'db, S: Services> Db<'db, S> {
                 ValueRecord::fresh()?
             };
             if value.codec.is_some() && record.length.is_none() {
-                // Equality can preserve a version whose payload was never durable
-                // (for example after request-only inputs). Persist these fresh bytes.
+                // Equality can preserve a version that only lived in the operation
+                // or session. Checkpointing still needs to consider its value.
                 changed = true;
             }
             records.insert(slot.clone(), record);

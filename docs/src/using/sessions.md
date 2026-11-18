@@ -83,9 +83,10 @@ payloads. The default budget is 16,384 records, 64 MiB of estimated encoded data
 and five minutes since last use. These are cache limits, not a measurement of
 allocator memory.
 
-The session store can refer back to an equal durable payload rather than keep a
-second decoded copy. Changed payloads remain typed values in memory. Transient
-query results still expire with the operation.
+An output that stayed equal to its saved version uses the saved payload, even
+while a deferred checkpoint is waiting to write it. Only changed payloads use
+the session's byte budget alongside its query records. Transient results still
+expire with the operation.
 
 `clear_session` drops retained session query work. It does not close editor
 buffers or replace input overlays; the host owns those actions. Keeping many

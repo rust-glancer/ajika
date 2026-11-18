@@ -298,45 +298,83 @@ fn session_eviction_bounds_retained_work_and_recomputes_on_demand() -> Result<()
 }
 
 #[test]
-fn collecting_deferred_work_keeps_a_newer_editor_draft_visible() -> Result<()> {
-    let directory = tempfile::tempdir()?;
+fn session_reuses_equal_persistent_outputs_before_and_after_collect() -> Result<()> {
     let input = |text, lifetime| Source { text, lifetime }.capture();
-    let options = test_options().defer_checkpoints(1024 * 1024);
-    let mut db = Database::open(
-        directory.path(),
-        "test",
-        input("saved", Lifetime::Persistent),
-        (),
-        options.clone(),
-    )?;
-    db.run(answer)?;
-    db.replace_inputs(input("draft", Lifetime::Session));
-    let read = |db: &Db| Ok((answer(db)?, document(db)?.2.value(db)?.len()));
-    for collect in [false, true] {
-        if collect {
-            db.collect()?;
+    let options = test_options()
+        .defer_checkpoints(1024 * 1024)
+        .session_retention(ajika::Retention {
+            max_bytes: 8 * 1024,
+            ..retention()
+        });
+    let read = |db: &Db| {
+        let large = document(db)?.2.value(db)?;
+        assert_eq!(large.as_slice(), &[7; 64 * 1024]);
+        assert_eq!(answer(db)?.as_str(), "answer:draft");
+        Ok(Arc::downgrade(&large))
+    };
+    for collect_before_save in [false, true] {
+        let directory = tempfile::tempdir()?;
+        let mut db = Database::open(
+            directory.path(),
+            "test",
+            input("saved", Lifetime::Persistent),
+            (),
+            options.clone(),
+        )?;
+        let saved = db.run(|cx| {
+            answer(cx)?;
+            Ok(Arc::downgrade(&document(cx)?.2.value(cx)?))
+        })?;
+        db.replace_inputs(input("draft", Lifetime::Session));
+        let edited = db.run(read)?;
+        assert!(
+            edited.ptr_eq(&saved) || edited.upgrade().is_none(),
+            "the session released its equal copy of the saved output"
+        );
+        db.run(read)?;
+        assert_eq!(
+            db.statistics().executed,
+            0,
+            "the edited result fits in 8 KiB"
+        );
+        assert_eq!(
+            db.statistics().decoded,
+            0,
+            "the saved output is still in RAM"
+        );
+        let stats = db.statistics();
+        assert_eq!(stats.metadata_reads + stats.header_reads, 0);
+        assert!(stats.pending_queries > 0);
+
+        if collect_before_save {
+            assert_eq!(db.collect()?, 0);
+            assert!(
+                saved.upgrade().is_none(),
+                "commit released the pending value"
+            );
+            db.run(read)?;
+            let stats = db.statistics();
+            assert_eq!(stats.executed, 0);
+            assert!(stats.bytes_read >= 64 * 1024);
+            assert_eq!(stats.metadata_reads + stats.header_reads, 0);
         }
-        let (text, size) = db.run(read)?;
-        assert_eq!(text.as_str(), "answer:draft");
-        assert_eq!(size, 64 * 1024);
-        if collect {
-            assert_eq!(db.statistics().executed, 0);
-        }
+
+        // Saving the exact edit must carry the large output forward, even if the
+        // original pending write and the save coalesce into a single checkpoint.
+        db.replace_inputs(input("draft", Lifetime::Persistent));
+        db.run(answer)?;
+        assert_eq!(db.statistics().executed, 0);
+        db.collect()?;
+        drop(db);
+        let mut db = Database::open(
+            directory.path(),
+            "test",
+            input("draft", Lifetime::Persistent),
+            (),
+            options.clone(),
+        )?;
+        db.run(read)?;
+        assert_eq!(db.statistics().executed, 0);
     }
-    // Save this draft by changing its lifetime alone. Its named outputs can now survive a restart.
-    db.replace_inputs(input("draft", Lifetime::Persistent));
-    db.run(answer)?;
-    assert_eq!(db.statistics().executed, 0);
-    db.collect()?;
-    drop(db);
-    let mut db = Database::open(
-        directory.path(),
-        "test",
-        input("draft", Lifetime::Persistent),
-        (),
-        options,
-    )?;
-    assert_eq!(db.run(read)?.1, 64 * 1024);
-    assert_eq!(db.statistics().executed, 0);
     Ok(())
 }

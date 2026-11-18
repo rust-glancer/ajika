@@ -64,9 +64,9 @@ fn reconstruct_transient(bencher: Bencher, files: u32) {
     );
 }
 
-/// Compare the response, immediately repeated response, and idle collection on the same
-/// synthetic request. The graph contributes dependency metadata and the selected outputs
-/// contribute about 16 MiB of payloads before compression.
+/// Measure the first request, a repeat of that request, and collection separately so we
+/// can see where the cost of writing moves. The query graph supplies the metadata and the
+/// selected outputs supply about 16 MiB of payloads before compression.
 mod write_behind {
     use divan::Bencher;
 

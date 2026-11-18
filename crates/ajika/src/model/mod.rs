@@ -53,8 +53,9 @@ impl Stamp {
 
 /// How long an input observation can justify reusing derived work.
 ///
-/// Editor text is a session input: its results can serve later requests, but must not replace
-/// saved results on disk. This is separate from durability, which describes how often it changes.
+/// For example, mark unsaved editor text as [`Session`](Self::Session) so its query
+/// results can serve later requests while the saved file's results stay on disk.
+/// Durability describes a different property, how often the input changes.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, SchemaRead, SchemaWrite)]
 pub enum Lifetime {
     /// Forget derived work when this operation ends.
@@ -107,19 +108,20 @@ pub struct Statistics {
     pub waits: u64,
     /// Query records reclaimed during the latest operation and subsequent collection.
     pub collected: u64,
-    /// Records in the persistent backend. Pending replacements are counted separately.
+    /// Records committed to disk, or retained in a memory database. A disk record still
+    /// counts here while a replacement for it waits in RAM.
     pub stored_queries: u64,
     /// Logical encoded bytes, excluding index overhead and allocator capacity.
     /// The typed memory backend does not serialize values to produce this counter.
     pub stored_bytes: u64,
-    /// Persistent records waiting in memory for a deferred checkpoint.
+    /// Query records waiting for a disk write. Repeated updates to the same query key count once.
     pub pending_queries: u64,
-    /// Estimated encoded bytes of pending records and resident persistent payloads.
+    /// Estimated encoded size of those records and the values they still hold in RAM.
     pub pending_bytes: u64,
     /// Session records retained after the operation, separate from the durable cache.
     pub session_queries: u64,
-    /// Encoded-size estimate of retained session records and changed payloads. Disk-backed
-    /// equal outputs are excluded. This is a budget measure, not allocator accounting.
+    /// Encoded-size estimate of retained session records and the payloads they own.
+    /// Outputs reused from persistent storage count against that store's budget.
     pub session_bytes: u64,
 }
 
