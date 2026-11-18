@@ -121,6 +121,11 @@ fn repeated_calls_share_values_and_same_revision_validity_survives_release() -> 
     );
     assert_eq!(db.statistics().executed, 2);
     assert_eq!(
+        db.statistics().metadata_reads,
+        0,
+        "the first request has no saved records to look up"
+    );
+    assert_eq!(
         db.statistics().decoded,
         0,
         "fresh values do not round-trip through disk"

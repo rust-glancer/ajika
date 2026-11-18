@@ -320,8 +320,15 @@ impl<'db, S: Services> Db<'db, S> {
             // A released header does not erase the proof that its result is still valid.
             // Recover the output metadata before deciding whether dependencies need checking.
             if memo.lock().header.is_none() {
-                let verified = database.backend.verified(&memo.id);
-                if verified == 0 || verified < database.changed_at[Durability::High as usize] {
+                let stored_revision = database.backend.verified(&memo.id);
+                let verified = stored_revision.unwrap_or(0);
+                if stored_revision.is_none() && database.backend.is_disk() {
+                    // The revision lookup already checked session records, pending writes, and
+                    // the full inventory of saved queries. Remember the miss for this operation.
+                    database.backend.check()?;
+                    memo.lock().record_loaded = true;
+                } else if verified == 0 || verified < database.changed_at[Durability::High as usize]
+                {
                     // On restart, or after all durability classes changed, dependency
                     // validation is unavoidable. Read the complete record once instead
                     // of loading a header and immediately fetching that same row again.

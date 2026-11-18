@@ -615,7 +615,8 @@ impl Backend {
 
     /// Use the revision from the same entry that supplies the record. A result for an
     /// edited file cannot inherit the saved file's validation just because the query key matches.
-    pub(crate) fn verified(&self, id: &QueryId) -> u64 {
+    /// `None` means the record is absent. `Some(0)` means it exists and still needs validation.
+    pub(crate) fn verified(&self, id: &QueryId) -> Option<u64> {
         if let Some(revision) = self
             .session
             .lock()
@@ -623,13 +624,13 @@ impl Backend {
             .verified(id)
             .or_else(|| self.pending()?.verified(id))
         {
-            return revision;
+            return Some(revision);
         }
         self.usage
             .lock()
             .expect("storage usage")
             .get(id)
-            .map_or(0, |entry| entry.verified)
+            .map(|entry| entry.verified)
     }
 
     /// Publish proofs only after their records have survived checkpointing and cancellation.
