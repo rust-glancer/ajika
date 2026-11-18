@@ -15,7 +15,6 @@ use std::{
         Arc, Mutex, MutexGuard,
         atomic::{AtomicU64, AtomicUsize, Ordering},
     },
-    thread,
     time::{Duration, Instant},
 };
 
@@ -27,6 +26,7 @@ mod coordination;
 mod diagnostics;
 mod evaluate;
 mod frame;
+mod options;
 mod output;
 mod parallel;
 mod record;
@@ -42,6 +42,7 @@ use self::{
 };
 pub use self::{
     coordination::{Cancellation, QueryCall, QueryCycle},
+    options::DatabaseOptions,
     output::{Output, OutputSlot},
 };
 
@@ -95,8 +96,9 @@ impl<S: Services> Database<S> {
     /// Keep reusable results as typed Rust values without opening a storage file.
     /// Answers of persistent-policy queries can survive between operations in this database instance;
     /// transient query values and request-only results are still released at operation end.
-    pub fn memory(inputs: crate::Inputs, services: S, retention: Retention) -> Self {
-        Self::new(inputs, services, Backend::memory(), retention)
+    /// Disk-only options are ignored.
+    pub fn memory(inputs: crate::Inputs, services: S, options: DatabaseOptions) -> Self {
+        Self::new(inputs, services, Backend::memory(), options)
     }
 
     /// Open or create a database whose saved results can survive process restarts.
@@ -111,17 +113,17 @@ impl<S: Services> Database<S> {
         epoch: &str,
         inputs: crate::Inputs,
         services: S,
-        retention: Retention,
+        options: DatabaseOptions,
     ) -> Result<Self> {
         Ok(Self::new(
             inputs,
             services,
-            Backend::open(path.as_ref(), epoch)?,
-            retention,
+            Backend::open(path.as_ref(), epoch, &options)?,
+            options,
         ))
     }
 
-    fn new(inputs: crate::Inputs, services: S, backend: Backend, retention: Retention) -> Self {
+    fn new(inputs: crate::Inputs, services: S, backend: Backend, options: DatabaseOptions) -> Self {
         Self {
             inputs,
             services,
@@ -130,13 +132,9 @@ impl<S: Services> Database<S> {
             revision: 1,
             changed_at: [1; 3],
             cancellation: Cancellation::default(),
-            parallelism: thread::available_parallelism().map_or(1, usize::from),
-            retention,
-            session_retention: Retention {
-                max_entries: 16_384,
-                max_bytes: 64 * 1024 * 1024,
-                max_idle: Duration::from_secs(300),
-            },
+            parallelism: options.parallelism,
+            retention: options.retention,
+            session_retention: options.session_retention,
             last_collection: Instant::now(),
             statistics: Statistics::default(),
         }
@@ -154,9 +152,21 @@ impl<S: Services> Database<S> {
         self.backend.recovery_pending()
     }
 
-    /// Counters from the latest operation, with any subsequent collection included.
+    /// Counters from the latest operation, including subsequent collection.
     pub fn statistics(&self) -> Statistics {
         self.statistics
+    }
+
+    fn refresh_storage_statistics(&mut self) {
+        (self.statistics.stored_queries, self.statistics.stored_bytes) = self.backend.usage();
+        (
+            self.statistics.pending_queries,
+            self.statistics.pending_bytes,
+        ) = self.backend.pending_usage();
+        (
+            self.statistics.session_queries,
+            self.statistics.session_bytes,
+        ) = self.backend.session_usage();
     }
 
     /// Choose the space/CPU policy for future disk writes. Existing values keep their own codec.
@@ -211,8 +221,8 @@ impl<S: Services> Database<S> {
         self.session_retention = retention;
     }
 
-    /// Release editor-derived work while preserving the durable baseline. For example, a host
-    /// can trim it when the last edited buffer is discarded. Later demands validate or recompute.
+    /// Drop results computed from session inputs. For example, when an editor discards
+    /// its unsaved buffers, the database can still reuse results for the saved files.
     pub fn clear_session(&mut self) {
         self.backend.clear_session();
         (
@@ -248,10 +258,11 @@ impl<S: Services> Database<S> {
     ///
     /// The callback receives a [`Db`] for the current captured inputs. Query answers become usable
     /// by other queries as soon as they are computed. Once the callback and its scoped workers
-    /// finish successfully, a checkpoint saves the operation's changes together. Ajika releases
-    /// the operation's working state when the run ends.
+    /// finish successfully, Ajika checkpoints their results for later runs. A disk database
+    /// normally writes persistent results before returning. [`DatabaseOptions::defer_checkpoints`]
+    /// lets them stay in RAM until [`collect`](Self::collect) or until the batch exceeds its budget.
     ///
-    /// Failure before checkpointing discards pending work, including successful child queries.
+    /// Failure before checkpointing discards this operation's work, including successful child queries.
     /// The host should reject inconsistent captured inputs before returning from the callback.
     /// A late cancellation can still return an error after a commit. Automatic maintenance
     /// failures are logged. When [`recovery_pending`](Self::recovery_pending) is true, the next
@@ -267,15 +278,22 @@ impl<S: Services> Database<S> {
     /// Returned [`Arc`]s keep their answers alive after the run, including across input changes.
     pub fn run<R>(&mut self, work: impl FnOnce(&Db<'_, S>) -> Result<R>) -> Result<R> {
         let _span = tracing::debug_span!("ajika.operation", revision = self.revision).entered();
+        let previous_statistics = std::mem::take(&mut self.statistics);
+        let mut drained = false;
         // Reset cancellation after a panic too, so a host that catches it can start another
         // operation. Working memos and query claims clean up through their own scopes.
         let outcome = panic::catch_unwind(panic::AssertUnwindSafe(|| {
             // Repair while this run still owns the cache exclusively. Check cancellation
             // first so an obsolete request leaves repair for the next one.
-            if let Err(error) = self.check_cancelled().and_then(|()| self.backend.recover()) {
-                return (Err(error), Statistics::default());
+            self.check_cancelled()?;
+            self.backend.recover()?;
+            // If the previous run exceeded its budget and the disk write failed, its
+            // results are still in RAM. Retry before the callback can add more.
+            if self.backend.pending_over_budget() {
+                self.drain_pending()?;
+                drained = true;
             }
-            let operation = Operation::new(self);
+            let operation = Operation::new(self, self.statistics);
             let frame = Frame::new(None);
             let db = Db {
                 operation: &operation,
@@ -283,8 +301,8 @@ impl<S: Services> Database<S> {
             };
             let result = (|| {
                 db.check_cancelled()?;
-                // Providers can publish completed values to each other in memory. Nothing is
-                // written to disk until the host callback and all its scoped work have finished.
+                // Queries can share their answers while the callback runs. Saving this
+                // operation's work waits until the callback and its workers have finished.
                 let callback_result = work(&db);
                 // Cancellation means an answer is no longer needed, but must not conceal a
                 // failure that a provider already recorded. Preserve real callback errors so
@@ -305,8 +323,6 @@ impl<S: Services> Database<S> {
                     .values()
                     .cloned()
                     .collect::<Vec<_>>();
-                // The checkpoint writes the completed producers together, including new
-                // dependency lists for results whose payloads compared equal.
                 self.backend.checkpoint(
                     &memos,
                     operation.now,
@@ -317,29 +333,37 @@ impl<S: Services> Database<S> {
                 // A completed commit may survive this cancellation. It remains cache
                 // data with its actual input observations, not an accepted project.
                 db.check_cancelled()?;
-                // A proof describes the record that was actually accepted. Do not publish
-                // proofs for pending replacements when the callback or checkpoint fails.
+                // Future runs may skip validation for this input revision. Give them
+                // that shortcut only after the corresponding query records are in place.
                 self.backend.remember_verified(&memos);
                 Ok(value)
             })();
             frame.finish(&mut operation.stats());
             let statistics = *operation.stats();
-            // Leaving this scope releases the working set on success and error alike.
-            (result, statistics)
+            // Encoding a large batch needs temporary buffers. Free the operation's
+            // working memory before allocating those buffers.
+            drop(operation);
+            self.statistics = statistics;
+            let value = result?;
+            if self.backend.pending_over_budget() {
+                self.drain_pending()?;
+                self.check_cancelled()?;
+                drained = true;
+            }
+            Ok(value)
         }));
         self.cancellation = Cancellation::default();
         match outcome {
-            Ok((result, statistics)) => {
-                self.statistics = statistics;
-                // Reclaim space after releasing the working set. A capacity refusal can
-                // still leave obsolete packs to reclaim. Log maintenance failures so the
-                // caller gets the completed answer or the original error.
-                let maintenance = if result.is_ok()
+            Ok(result) => {
+                // If disk writes are deferred, leave routine disk maintenance for
+                // collect() or a run that already had to write the pending results.
+                let maintain_disk = result.is_ok() && (!self.backend.is_deferred() || drained);
+                let maintenance = if maintain_disk
                     && (self.last_collection.elapsed() >= Duration::from_secs(60)
                         || self.backend.over_budget(self.retention))
                 {
-                    self.collect().map(|_| ())
-                } else if result.is_ok() || result.as_ref().is_err_and(Error::is_capacity) {
+                    self.collect_retained().map(|_| ())
+                } else if maintain_disk || result.as_ref().is_err_and(Error::is_capacity) {
                     self.backend.maintain()
                 } else {
                     Ok(())
@@ -351,14 +375,9 @@ impl<S: Services> Database<S> {
                         "automatic cache maintenance failed"
                     );
                 }
-                (self.statistics.stored_queries, self.statistics.stored_bytes) =
-                    self.backend.usage();
                 let removed = self.backend.collect_session(self.session_retention);
                 self.statistics.collected += removed as u64;
-                (
-                    self.statistics.session_queries,
-                    self.statistics.session_bytes,
-                ) = self.backend.session_usage();
+                self.refresh_storage_statistics();
                 tracing::debug!(
                     succeeded = result.is_ok(),
                     statistics = ?self.statistics,
@@ -366,7 +385,28 @@ impl<S: Services> Database<S> {
                 );
                 result
             }
-            Err(panic) => panic::resume_unwind(panic),
+            Err(panic) => {
+                self.statistics = previous_statistics;
+                panic::resume_unwind(panic)
+            }
+        }
+    }
+
+    fn drain_pending(&mut self) -> Result<usize> {
+        match self
+            .backend
+            .drain_pending(self.parallelism, &mut self.statistics)
+        {
+            Ok(()) => Ok(0),
+            Err(error) if error.is_capacity() => {
+                // The disk may have room for the new result once an old one is evicted.
+                // Collection can also trim the pending batch itself before we retry.
+                let removed = self.collect_retained()?;
+                self.backend
+                    .drain_pending(self.parallelism, &mut self.statistics)?;
+                Ok(removed)
+            }
+            Err(error) => Err(error),
         }
     }
 
@@ -382,23 +422,25 @@ impl<S: Services> Database<S> {
         Ok(())
     }
 
-    /// Apply retention limits to stored and session results. A later request can recompute an
-    /// evicted query and its outputs, including when needed by a retained query. Returns the
-    /// number of query records removed.
+    /// Apply retention limits and return the number of query records evicted.
+    /// A later request can recompute an evicted query and its outputs. Interned IDs remain valid.
     ///
-    /// Successful runs already collect periodically or when over budget. The host can request
-    /// this pass at another idle boundary too. Interned IDs remain valid.
+    /// With deferred writes, call this when the application is idle or before closing
+    /// the database. It synchronizes pending results to disk and can evict old records
+    /// first if it needs space. Eager databases also collect periodically or when over budget.
     pub fn collect(&mut self) -> Result<usize> {
+        let reclaimed = self.drain_pending()?;
+        self.refresh_storage_statistics();
+        Ok(reclaimed + self.collect_retained()?)
+    }
+
+    fn collect_retained(&mut self) -> Result<usize> {
         let mut removed = self.backend.collect(self.retention)?;
         removed += self.backend.collect_session(self.session_retention);
         self.backend.interner.reallocate();
         self.last_collection = Instant::now();
         self.statistics.collected += removed as u64;
-        (self.statistics.stored_queries, self.statistics.stored_bytes) = self.backend.usage();
-        (
-            self.statistics.session_queries,
-            self.statistics.session_bytes,
-        ) = self.backend.session_usage();
+        self.refresh_storage_statistics();
         self.backend.maintain()?;
         Ok(removed)
     }
@@ -408,16 +450,14 @@ impl<S: Services> Database<S> {
     /// when the disk can still be written. The next operation computes its answers from scratch.
     pub fn invalidate(&mut self) -> Result<()> {
         self.backend.invalidate()?;
-        self.statistics.stored_queries = 0;
-        self.statistics.stored_bytes = 0;
-        self.statistics.session_queries = 0;
-        self.statistics.session_bytes = 0;
+        self.refresh_storage_statistics();
         Ok(())
     }
 
     /// Finish physical reclamation and shrink the index at an idle boundary. Unlike the small
     /// automatic passes between operations, this call can copy all remaining live payloads.
-    /// It changes no query results or validity, and is a no-op for memory storage.
+    /// It acts on the existing disk checkpoint. Call [`Self::collect`] first to include deferred
+    /// work. It changes no query results or validity, and is a no-op for memory storage.
     pub fn compact(&mut self) -> Result<bool> {
         self.backend.compact()
     }
@@ -450,14 +490,14 @@ struct Operation<'db, S: Services> {
 }
 
 impl<'db, S: Services> Operation<'db, S> {
-    fn new(database: &'db Database<S>) -> Self {
+    fn new(database: &'db Database<S>, statistics: Statistics) -> Self {
         static NEXT_OPERATION: AtomicU64 = AtomicU64::new(1);
         Self {
             id: NEXT_OPERATION.fetch_add(1, Ordering::Relaxed),
             database,
             memos: Memos::default(),
             touched: Mutex::default(),
-            statistics: Mutex::default(),
+            statistics: Mutex::new(statistics),
             spare: AtomicUsize::new(database.parallelism - 1),
             now: Backend::now(),
         }

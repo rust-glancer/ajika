@@ -1,6 +1,6 @@
 use std::time::Duration;
 
-use ajika::{Database, Db, Inputs, Retention};
+use ajika::{Database, DatabaseOptions, Db, Inputs, Retention};
 
 #[ajika::input(key = String)]
 struct File {
@@ -30,7 +30,13 @@ fn main() -> anyhow::Result<()> {
         max_idle: Duration::from_secs(24 * 60 * 60),
     };
 
-    let mut database = Database::open(&path, "word-count-v1", Inputs::default(), (), limits)?;
+    let mut database = Database::open(
+        &path,
+        "word-count-v1",
+        Inputs::default(),
+        (),
+        DatabaseOptions::new(limits),
+    )?;
     database.update_inputs(|update| {
         File::at("notes.txt".into()).set_text(update, "hello world".to_owned())
     })?;
@@ -43,7 +49,13 @@ fn main() -> anyhow::Result<()> {
     // Simulate fresh acquisition by the application, without reusing the old Inputs.
     let inputs = Inputs::default()
         .edit(|update| File::at("notes.txt".into()).set_text(update, "hello world".to_owned()))?;
-    let mut database = Database::open(&path, "word-count-v1", inputs, (), limits)?;
+    let mut database = Database::open(
+        &path,
+        "word-count-v1",
+        inputs,
+        (),
+        DatabaseOptions::new(limits),
+    )?;
     assert_eq!(*database.run(|db| word_count(db, "notes.txt".into()))?, 2);
     assert_eq!(database.statistics().executed, 0);
     assert_eq!(database.statistics().validated, 2);

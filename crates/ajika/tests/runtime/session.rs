@@ -1,9 +1,9 @@
 use std::sync::Arc;
 
-use ajika::{Database, Inputs, Lifetime, Output, Stamp};
+use ajika::{Database, DatabaseOptions, Inputs, Lifetime, Output, Stamp};
 use anyhow::Result;
 
-use super::retention;
+use super::{retention, test_options};
 
 #[derive(Clone)]
 struct Source {
@@ -72,9 +72,9 @@ fn one_checkpoint_retains_each_lifetime_in_its_own_store() -> Result<()> {
         .capture()
         .edit(|update| Request::at(()).set_label(update, "request".to_owned()))?;
         let mut db = if disk {
-            Database::open(directory.path(), "test", inputs, (), retention())?
+            Database::open(directory.path(), "test", inputs, (), test_options())?
         } else {
-            Database::memory(inputs, (), retention())
+            Database::memory(inputs, (), test_options())
         };
 
         // One checkpoint contains persistent, session and operation work. On the next request,
@@ -107,7 +107,7 @@ fn editor_results_survive_requests_and_save_without_recomputation() -> Result<()
         }
         .capture(),
         (),
-        retention(),
+        test_options(),
     )?;
     assert_eq!(&*db.run(answer)?, "answer:one");
     let durable_bytes = db.statistics().stored_bytes;
@@ -163,7 +163,7 @@ fn editor_results_survive_requests_and_save_without_recomputation() -> Result<()
         }
         .capture(),
         (),
-        retention(),
+        test_options(),
     )?;
     assert_eq!(&*db.run(answer)?, "answer:two");
     assert_eq!(
@@ -183,10 +183,10 @@ fn memory_session_results_survive_promotion_with_a_zero_disk_budget() -> Result<
         }
         .capture(),
         (),
-        ajika::Retention {
+        DatabaseOptions::new(ajika::Retention {
             max_bytes: 0,
             ..retention()
-        },
+        }),
     );
     assert_eq!(&*db.run(answer)?, "answer:edited");
 
@@ -230,7 +230,7 @@ fn discarding_editor_work_recovers_the_saved_baseline() -> Result<()> {
         }
         .capture(),
         (),
-        retention(),
+        test_options(),
     )?;
     db.run(answer)?;
     db.replace_inputs(
@@ -273,12 +273,12 @@ fn session_eviction_bounds_retained_work_and_recomputes_on_demand() -> Result<()
             text: "edited",
             lifetime: Lifetime::Session,
         };
-        let mut db = Database::memory(source.capture(), (), retention());
-        db.set_session_retention(ajika::Retention {
+        let options = test_options().session_retention(ajika::Retention {
             max_entries,
             max_bytes,
             ..retention()
         });
+        let mut db = Database::memory(source.capture(), (), options);
         // Request every key again so the assertion does not depend on which keys were evicted.
         for expected_executions in [3, 3 - retained] {
             db.run(|cx| {
@@ -293,6 +293,88 @@ fn session_eviction_bounds_retained_work_and_recomputes_on_demand() -> Result<()
             assert!(stats.session_bytes <= max_bytes, "{case} budget");
             assert_eq!(stats.stored_queries, 0);
         }
+    }
+    Ok(())
+}
+
+#[test]
+fn session_reuses_equal_persistent_outputs_before_and_after_collect() -> Result<()> {
+    let input = |text, lifetime| Source { text, lifetime }.capture();
+    let options = test_options()
+        .defer_checkpoints(1024 * 1024)
+        .session_retention(ajika::Retention {
+            max_bytes: 8 * 1024,
+            ..retention()
+        });
+    let read = |db: &Db| {
+        let large = document(db)?.2.value(db)?;
+        assert_eq!(large.as_slice(), &[7; 64 * 1024]);
+        assert_eq!(answer(db)?.as_str(), "answer:draft");
+        Ok(Arc::downgrade(&large))
+    };
+    for collect_before_save in [false, true] {
+        let directory = tempfile::tempdir()?;
+        let mut db = Database::open(
+            directory.path(),
+            "test",
+            input("saved", Lifetime::Persistent),
+            (),
+            options.clone(),
+        )?;
+        let saved = db.run(|cx| {
+            answer(cx)?;
+            Ok(Arc::downgrade(&document(cx)?.2.value(cx)?))
+        })?;
+        db.replace_inputs(input("draft", Lifetime::Session));
+        let edited = db.run(read)?;
+        assert!(
+            edited.ptr_eq(&saved) || edited.upgrade().is_none(),
+            "the session released its equal copy of the saved output"
+        );
+        db.run(read)?;
+        assert_eq!(
+            db.statistics().executed,
+            0,
+            "the edited result fits in 8 KiB"
+        );
+        assert_eq!(
+            db.statistics().decoded,
+            0,
+            "the saved output is still in RAM"
+        );
+        let stats = db.statistics();
+        assert_eq!(stats.metadata_reads + stats.header_reads, 0);
+        assert!(stats.pending_queries > 0);
+
+        if collect_before_save {
+            assert_eq!(db.collect()?, 0);
+            assert!(
+                saved.upgrade().is_none(),
+                "commit released the pending value"
+            );
+            db.run(read)?;
+            let stats = db.statistics();
+            assert_eq!(stats.executed, 0);
+            assert!(stats.bytes_read >= 64 * 1024);
+            assert_eq!(stats.metadata_reads + stats.header_reads, 0);
+        }
+
+        // Saving the exact edit must carry the large output forward, even if the
+        // original pending write and the save coalesce into a single checkpoint.
+        db.replace_inputs(input("draft", Lifetime::Persistent));
+        db.run(answer)?;
+        assert_eq!(db.statistics().executed, 0);
+        db.collect()?;
+        drop(db);
+        let mut db = Database::open(
+            directory.path(),
+            "test",
+            input("draft", Lifetime::Persistent),
+            (),
+            options.clone(),
+        )?;
+        db.run(read)?;
+        assert_eq!(db.statistics().executed, 0);
     }
     Ok(())
 }

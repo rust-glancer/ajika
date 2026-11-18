@@ -4,12 +4,12 @@ During evaluation, completed answers are visible to other queries in the operati
 They are not yet part of the retained backend state. This lets a parent use a new
 child immediately while still allowing the host to reject the whole operation.
 
-[`Database::run`](https://github.com/rust-glancer/ajika/blob/main/crates/ajika/src/runtime/mod.rs#L238) starts checkpointing only after the callback returns
+[`Database::run`](https://github.com/rust-glancer/ajika/blob/main/crates/ajika/src/runtime/mod.rs#L279) starts checkpointing only after the callback returns
 successfully, scoped workers have finished, and cancellation has been checked.
 
 ## Decide what can survive
 
-[`Backend::checkpoint`](https://github.com/rust-glancer/ajika/blob/main/crates/ajika/src/runtime/backend/mod.rs#L372) gathers memos marked dirty: they have record or payload
+[`Backend::checkpoint`](https://github.com/rust-glancer/ajika/blob/main/crates/ajika/src/runtime/backend/mod.rs#L714) gathers memos marked dirty: they have record or payload
 changes for checkpointing to handle. It prepares replacements for retained work.
 The query's inherited lifetime determines where Ajika can keep the record and
 its values:
@@ -17,7 +17,7 @@ its values:
 ```text
 operation lifetime  → no retained replacement
 session lifetime    → bounded in-memory override
-persistent lifetime → durable backend
+persistent lifetime → backend (pending in RAM if disk writes are deferred)
 ```
 
 The destination applies to the dependency record as well as eligible values.
@@ -27,7 +27,7 @@ outputs can survive there too.
 
 If nothing is dirty, there is no checkpoint work. In particular, allocating an
 interned ID by itself does not force a durable transaction; pending assignments
-are included when query work is durably checkpointed.
+are included when persistent query work is written to disk.
 
 ## Reuse durable payloads where versions match
 
@@ -37,12 +37,16 @@ baseline. An output that kept its version and already has stored bytes can retai
 that location. A removed slot loses its location. New or changed persistent
 values need encoding.
 
+With deferred checkpoints, each producer's latest record and changed values stay
+in RAM. Collection or budget pressure writes the batch in one transaction.
+Comparing against the disk baseline at that point lets several edits share one write.
+
 In the whitespace edit, `words` kept W1, so its saved vector can stay where it is.
 Its record must still change: the function now depends on text stamp S2 instead
 of S1. Leaving S1 in the record would make a later dependency check rediscover the
 same change and recompute `words` again. No payload bytes need rewriting for this change.
 
-Many outputs may change in one operation. [`PendingValue::write_all`](https://github.com/rust-glancer/ajika/blob/main/crates/ajika/src/runtime/backend/encoding.rs#L28) prepares
+Many outputs may change in one operation. [`PendingValue::write_all`](https://github.com/rust-glancer/ajika/blob/main/crates/ajika/src/runtime/backend/encoding.rs#L29) prepares
 bounded batches so checkpointing does not keep an encoded copy of every changed
 value at once. Workers serialize and compress a batch in parallel; the caller
 passes its buffers to the storage writer and releases them before the next batch.
@@ -55,17 +59,18 @@ the durable transaction.
 
 ## Session work overlays the saved baseline
 
-A session record contains the producer's complete output metadata and dependency
-list. Its changed persistent-policy payloads remain typed values in memory.
-Equal durable payloads can be read from their saved locations instead of being
-duplicated in the session store.
+Consider the body outputs A and B from the [output chapter](outputs.md). An
+editor opens the saved file, then makes an unsaved edit that deletes B and
+leaves A unchanged. The query result for the edited text goes in the session
+store. Its record lists only A. Looking up B in the saved record would make
+the deleted output visible again.
 
-Consider the body outputs A and B from the [output chapter](outputs.md). If an
-unsaved edit deletes B, the session record must list only A. Falling through to
-the saved output metadata would incorrectly make B visible again. A surviving
-slot such as A can still use its saved payload when the versions match.
+A kept its version, so the session only needs its metadata. If the saved result
+is waiting for a write, the next request reads A from that pending result.
+After commit, the same session record gives the length needed to read A from
+disk. Only the edited outputs count toward the session's payload budget.
 
-An operation containing only session changes does not open a durable writer.
+Keeping a session result between requests requires no disk write.
 If the host later saves that exact draft, it publishes the same input content
 with persistent lifetime. Validation can reuse the session answer, and
 checkpointing promotes its retained data without rerunning the query.
@@ -73,12 +78,12 @@ checkpointing promotes its retained data without rerunning the query.
 The typed memory backend uses the same logical decisions, but keeps eligible
 Rust values directly rather than serializing them.
 
-## Publish bookkeeping after storage succeeds
+## Keep verification with the accepted record
 
-Only after a successful checkpoint does the backend replace retained session
-work and update its usage inventory. The owner then remembers verified revisions
-for accepted records. Otherwise, a later operation could skip validation based
-on a replacement that existed only in the failed operation's working memos.
+The owner remembers a verified revision only after accepting the record it
+describes. Otherwise a failed operation could leave a proof for work it discarded.
+When a pending checkpoint reaches disk, its verification and last-use time go
+with it. A rolled-back write leaves the pending record available for retry.
 
 The working memos leave with the operation on both success and failure.
 Retained host `Arc` values are outside that cleanup.
@@ -98,7 +103,3 @@ The host should not infer acceptance of a project generation or editor response
 from the mere existence of those files. Stored results retain their actual input
 observations, so they can be validated later, regardless of whether the host used
 the response.
-
-After the working set is released, routine retention and physical maintenance
-can run. That ordering keeps maintenance from carrying the operation's decoded
-query values into an otherwise idle period.

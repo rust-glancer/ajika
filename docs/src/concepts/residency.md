@@ -66,7 +66,7 @@ These choices combine as follows:
 
 | Configuration | Between operations |
 | --- | --- |
-| Disk, default query, persistent inputs | Stored payload can be reloaded; decoded working values are released. |
+| Disk, default query, persistent inputs | Payloads can be reloaded from disk. With deferred writes, pending values stay in RAM until committed or evicted. |
 | Disk, default query, session input | Retained changed results stay in the bounded session store. |
 | Disk, transient query, persistent inputs | Dependency information can survive; the primary value is reconstructed when needed. |
 | Memory, default query, persistent inputs | Eligible typed values remain in memory. |

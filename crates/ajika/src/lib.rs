@@ -33,5 +33,8 @@ pub use self::{
     input::{Field, Input, InputInit, InputUpdate, Inputs},
     interner::Interner,
     model::{Durability, Lifetime, Query, Retention, Stamp, Statistics, Storage},
-    runtime::{Cancellation, Database, Db, Output, OutputSlot, QueryCall, QueryCycle, Services},
+    runtime::{
+        Cancellation, Database, DatabaseOptions, Db, Output, OutputSlot, QueryCall, QueryCycle,
+        Services,
+    },
 };

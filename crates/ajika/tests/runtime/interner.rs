@@ -4,7 +4,7 @@ use ajika as renamed;
 use ajika::Database;
 use anyhow::Result;
 
-use super::{Db, inputs, retention};
+use super::{Db, inputs, test_options};
 
 #[ajika::interned(name = "files")]
 struct File {
@@ -18,39 +18,43 @@ fn file_id(cx: &Db, path: String) -> ajika::Result<File> {
 
 #[test]
 fn interned_ids_survive_parallel_discovery_collection_and_restart() -> Result<()> {
-    let directory = tempfile::tempdir()?;
-    let path = directory.path().join("queries");
-    let mut db = Database::open(&path, "test", inputs(""), (), retention())?;
-    let ids = db.run(|cx| {
-        cx.parallel_map(&["a.rs", "b.rs", "a.rs"], |cx, path| {
-            file_id(cx, (*path).into())
-        })
-    })?;
-    assert_eq!(ids[0], ids[2]);
-    assert_ne!(ids[0], ids[1]);
+    let options = test_options();
+    for options in [options.clone(), options.defer_checkpoints(1024 * 1024)] {
+        let directory = tempfile::tempdir()?;
+        let path = directory.path().join("queries");
+        let mut db = Database::open(&path, "test", inputs(""), (), options)?;
+        let ids = db.run(|cx| {
+            cx.parallel_map(&["a.rs", "b.rs", "a.rs"], |cx, path| {
+                file_id(cx, (*path).into())
+            })
+        })?;
+        assert_eq!(ids[0], ids[2]);
+        assert_ne!(ids[0], ids[1]);
 
-    // Collection preserves saved assignments, pending assignments and keys held by callers.
-    let interner = db.interner();
-    let first_key = ids[0].path(&interner)?;
-    let pending = File::new(&interner, "c.rs".into())?;
-    db.collect()?;
-    assert_eq!(first_key, "a.rs");
-    assert_eq!(ids[0].path(&interner)?, "a.rs");
+        // Collection preserves saved assignments, pending assignments and keys held by callers.
+        let interner = db.interner();
+        let first_key = ids[0].path(&interner)?;
+        let pending = File::new(&interner, "c.rs".into())?;
+        db.collect()?;
+        assert_eq!(first_key, "a.rs");
+        assert_eq!(ids[0].path(&interner)?, "a.rs");
 
-    // Query collection cannot retire IDs that the host or another saved result may still use.
-    db.invalidate()?;
-    for (name, expected) in [("b.rs", ids[1].clone()), ("a.rs", ids[0].clone())] {
-        assert_eq!(db.run(|cx| file_id(cx, name.into()))?, expected);
+        // Query collection cannot retire IDs that the host or another saved result may still use.
+        db.invalidate()?;
+        for (name, expected) in [("b.rs", ids[1].clone()), ("a.rs", ids[0].clone())] {
+            assert_eq!(db.run(|cx| file_id(cx, name.into()))?, expected);
+        }
+        db.collect()?;
+        drop(db);
+        let mut db = Database::open(path, "test", inputs(""), (), test_options())?;
+        let interner = db.interner();
+        assert_eq!(pending.path(&interner)?, "c.rs");
+        assert_eq!(File::new(&interner, "b.rs".into())?, *ids[1]);
+        assert_eq!(File::new(&interner, "a.rs".into())?, *ids[0]);
+        assert_eq!(File::new(&interner, "c.rs".into())?, pending);
+        assert_eq!(db.run(|cx| file_id(cx, "a.rs".into()))?, ids[0]);
+        assert_eq!(db.statistics().executed, 0);
     }
-    drop(db);
-    let mut db = Database::open(path, "test", inputs(""), (), retention())?;
-    let interner = db.interner();
-    assert_eq!(pending.path(&interner)?, "c.rs");
-    assert_eq!(File::new(&interner, "b.rs".into())?, *ids[1]);
-    assert_eq!(File::new(&interner, "a.rs".into())?, *ids[0]);
-    assert_eq!(File::new(&interner, "c.rs".into())?, pending);
-    assert_eq!(db.run(|cx| file_id(cx, "a.rs".into()))?, ids[0]);
-    assert_eq!(db.statistics().executed, 0);
     Ok(())
 }
 
@@ -58,7 +62,7 @@ fn interned_ids_survive_parallel_discovery_collection_and_restart() -> Result<()
 fn interning_does_not_write_without_a_durable_checkpoint() -> Result<()> {
     let directory = tempfile::tempdir()?;
     let path = directory.path().join("queries");
-    let mut db = Database::open(&path, "test", inputs(""), (), retention())?;
+    let mut db = Database::open(&path, "test", inputs(""), (), test_options())?;
     db.run(|cx| {
         File::new(&cx.interner(), "editor.rs".into())?;
         Ok(())
@@ -66,7 +70,7 @@ fn interning_does_not_write_without_a_durable_checkpoint() -> Result<()> {
     assert_eq!(db.statistics().bytes_written, 0);
     drop(db);
     // No stored value could refer to editor.rs, so it did not acquire durable identity yet.
-    let db = Database::open(path, "test", inputs(""), (), retention())?;
+    let db = Database::open(path, "test", inputs(""), (), test_options())?;
     assert_eq!(File::new(&db.interner(), "saved.rs".into())?.as_raw(), 0);
     Ok(())
 }
@@ -127,7 +131,7 @@ struct DamagedCache {
 impl DamagedCache {
     fn new() -> Result<Self> {
         let root = tempfile::tempdir()?;
-        let mut db = Database::open(root.path(), "test", inputs(""), (), retention())?;
+        let mut db = Database::open(root.path(), "test", inputs(""), (), test_options())?;
         db.set_compression(ajika::Compression::None);
         let saved = db.run(|cx| {
             packed_value(cx, 42)?;
@@ -143,7 +147,7 @@ fn restart_repairs_a_damaged_pack_and_keeps_saved_ids() -> Result<()> {
     let DamagedCache { root, db, saved } = DamagedCache::new()?;
     drop(db);
 
-    let mut db = Database::open(root.path(), "test", inputs(""), (), retention())?;
+    let mut db = Database::open(root.path(), "test", inputs(""), (), test_options())?;
     assert_eq!(saved.path(&db.interner())?, "saved.rs");
     assert_eq!(db.run(|cx| packed_value(cx, 42))?.as_slice(), &[42; 4096]);
     assert_eq!(db.statistics().executed, 1);
@@ -176,7 +180,7 @@ fn next_run_repairs_the_cache_and_preserves_live_ids() -> Result<()> {
     assert_eq!(pending.path(&interner)?, "pending.rs");
 
     drop(db);
-    let db = Database::open(root.path(), "test", inputs(""), (), retention())?;
+    let db = Database::open(root.path(), "test", inputs(""), (), test_options())?;
     assert_eq!(pending.path(&db.interner())?, "pending.rs");
     Ok(())
 }
@@ -201,7 +205,7 @@ fn invalidation_repairs_the_cache_and_persists_live_ids() -> Result<()> {
     drop(db);
 
     // Reopen before any query checkpoint can save the pending assignment.
-    let mut db = Database::open(root.path(), "test", inputs(""), (), retention())?;
+    let mut db = Database::open(root.path(), "test", inputs(""), (), test_options())?;
     assert_eq!(pending.path(&db.interner())?, "pending.rs");
     assert_eq!(saved.path(&db.interner())?, "saved.rs");
     assert_eq!(db.run(|cx| packed_value(cx, 42))?.as_slice(), &[42; 4096]);
@@ -212,7 +216,7 @@ fn invalidation_repairs_the_cache_and_persists_live_ids() -> Result<()> {
 #[test]
 fn successful_run_can_leave_recovery_pending() -> Result<()> {
     let root = tempfile::tempdir()?;
-    let mut db = Database::open(root.path(), "test", inputs(""), (), retention())?;
+    let mut db = Database::open(root.path(), "test", inputs(""), (), test_options())?;
     db.run(|cx| packed_value(cx, 0))?;
     truncate_only_pack(root.path())?;
 
@@ -238,7 +242,7 @@ fn successful_run_can_leave_recovery_pending() -> Result<()> {
 #[test]
 fn an_aborted_pack_write_keeps_the_warm_checkpoint() -> Result<()> {
     let root = tempfile::tempdir()?;
-    let mut db = Database::open(root.path(), "test", inputs(""), (), retention())?;
+    let mut db = Database::open(root.path(), "test", inputs(""), (), test_options())?;
     let saved = db.run(|cx| file_id(cx, "saved.rs".into()))?;
     std::fs::remove_dir(root.path().join("packs"))?;
     db.run(|cx| packed_value(cx, 42))

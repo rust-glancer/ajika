@@ -1,7 +1,7 @@
 // ANCHOR: queries
 use std::{sync::Arc, time::Duration};
 
-use ajika::{Database, Db, Inputs, Retention};
+use ajika::{Database, DatabaseOptions, Db, Inputs, Retention};
 
 // ANCHOR: declarations
 #[ajika::input(key = String)]
@@ -38,7 +38,7 @@ fn main() -> anyhow::Result<()> {
         max_bytes: 256 * 1024 * 1024,
         max_idle: Duration::from_secs(24 * 60 * 60),
     };
-    let mut database = Database::memory(Inputs::default(), (), limits);
+    let mut database = Database::memory(Inputs::default(), (), DatabaseOptions::new(limits));
     let file = File::at("notes.txt".into());
     database.update_inputs(|update| file.set_text(update, "hello world".to_owned()))?;
 

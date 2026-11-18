@@ -56,7 +56,7 @@ impl Unscaled {
 
 #[test]
 fn associated_queries_share_results_and_keep_owners_distinct() -> Result<()> {
-    let mut db = Database::memory(super::inputs(""), (), super::retention());
+    let mut db = Database::memory(super::inputs(""), (), super::test_options());
     db.run(|db| {
         let scaled = Scaled::captured(db, 3)?;
         assert_eq!(scaled.value(), 6);

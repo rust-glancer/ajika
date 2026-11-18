@@ -49,7 +49,7 @@ cleanup to reopening, which can inspect the committed catalog.
 
 Read views pin their backing files. The storage API requires their scopes to end
 before writing; returned byte buffers are owned and do not pin a read view.
-Ajika uses short reads while evaluating, then writes at the operation boundary.
+Ajika uses short reads during evaluation and opens a writer when a checkpoint is ready for disk.
 
 The [transaction implementation](https://github.com/rust-glancer/ajika/blob/main/crates/ajika-storage/src/transaction/mod.rs#L185) contains the commit sequence that makes pack
 locations visible. On Unix, it synchronizes directory entries as well as files.
@@ -105,16 +105,15 @@ Between operations, the disk backend keeps compact usage entries: call ID,
 last-use time, logical size, and verified revision. It does not retain every
 query's encoded key, dependency vector, output metadata, and mutex.
 
-On reopening, [`Backend::open`](https://github.com/rust-glancer/ajika/blob/main/crates/ajika/src/runtime/backend/mod.rs#L90) rebuilds that inventory from
+On reopening, [`Backend::open`](https://github.com/rust-glancer/ajika/blob/main/crates/ajika/src/runtime/backend/mod.rs#L267) rebuilds that inventory from
 record metadata without decoding query payloads. Verified revisions begin at
 zero. Full records and headers are acquired into operation memos when needed.
 
 The storage layer also keeps a small cache of open pack files to avoid reopening
-them for every read, and redb has its own page cache. These remain useful between
-operations, even though the runtime has released its decoded query values.
+them for every read, and redb has its own page cache.
 
-Inputs, interner state, bounded session values, and answers kept by the host add
-to that memory use. Releasing query working state does not guarantee an allocator
+Inputs, interner state, session results, pending checkpoints, and answers kept
+by the host add to that memory use. Releasing query working state does not guarantee an allocator
 immediately returns all freed pages to the OS.
 
 Interned keys outlive many operations. If temporary discovery data was allocated

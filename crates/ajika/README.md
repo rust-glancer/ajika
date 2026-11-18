@@ -4,8 +4,8 @@ Ajika is a synchronous incremental query library with persistent storage. It
 tracks the inputs and other query answers each function reads, so unchanged
 answers can be reused after edits and restarts.
 
-Calls share query values within an operation started by [`Database::run`]. The
-disk backend saves reusable results and releases its working data when that
+Calls share query values within an operation started by [`Database::run`]. By default,
+the disk backend saves reusable results and releases its working data when that
 operation ends.
 
 [The Ajika Book](https://rust-glancer.github.io/ajika/) provides a tutorial,
@@ -17,7 +17,7 @@ Declare an input and two queries, then supply text and ask for its word count:
 
 ```rust
 use std::time::Duration;
-use ajika::{Database, Db, Inputs, Result, Retention};
+use ajika::{Database, DatabaseOptions, Db, Inputs, Result, Retention};
 
 #[ajika::input(key = String)]
 struct File {
@@ -43,7 +43,7 @@ let limits = Retention {
     max_idle: Duration::from_secs(24 * 60 * 60),
 };
 // This example needs no host services.
-let mut database = Database::memory(Inputs::default(), (), limits);
+let mut database = Database::memory(Inputs::default(), (), DatabaseOptions::new(limits));
 let file = File::at("notes.txt".into());
 database.update_inputs(|update| file.set_text(update, "hello world".to_owned()))?;
 let count = database.run(|db| word_count(db, "notes.txt".into()))?;
@@ -69,6 +69,9 @@ supplies current inputs on startup, and Ajika validates saved answers against
 them when requested. The book's [persistence guide](https://rust-glancer.github.io/ajika/using/persistence.html)
 walks through opening and reopening a cache.
 
+For interactive requests, [`DatabaseOptions::defer_checkpoints`] keeps pending
+results in RAM for reuse. Call [`Database::collect`] to write them when idle.
+
 ## Find the API you need
 
 | Task | API |
@@ -76,7 +79,7 @@ walks through opening and reopening a cache.
 | Declare queries, including associated functions and forwarding | [`query`](macro@query), [`Query`] |
 | Supply, update, or lazily load inputs | [`input`](macro@input), [`Inputs`], [`InputUpdate`] |
 | Run work against the current inputs | [`Database`], [`Db`] |
-| Choose result lifetimes and cache limits | [`Storage`], [`Lifetime`], [`Retention`] |
+| Choose result lifetimes and cache limits | [`Storage`], [`Lifetime`], [`Retention`], [`DatabaseOptions`] |
 | Publish separately readable outputs | [`output`](macro@output), [`Output`] |
 | Intern immutable values | [`interned`](macro@interned), [`Interner`] |
 | Run parallel work or handle cancellation | [`Db::parallel_map`], [`Cancellation`], [`QueryCycle`] |

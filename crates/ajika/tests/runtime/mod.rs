@@ -1,6 +1,6 @@
 use std::{sync::Arc, time::Duration};
 
-use ajika::{Database, Inputs, Retention};
+use ajika::{Database, DatabaseOptions, Inputs, Retention};
 use anyhow::Result;
 
 mod associated;
@@ -49,6 +49,10 @@ fn inputs(text: &str) -> Inputs {
     .capture()
 }
 
+fn test_options() -> DatabaseOptions {
+    DatabaseOptions::new(retention())
+}
+
 fn retention() -> Retention {
     Retention {
         max_entries: 256,
@@ -94,7 +98,7 @@ fn repeated_calls_share_values_and_same_revision_validity_survives_release() -> 
         "test",
         inputs("fn main() {}"),
         (),
-        retention(),
+        test_options(),
     )?;
     let (weak, events) = diagnostics::capture(tracing::Level::TRACE, || {
         db.run(|db| {
@@ -152,7 +156,7 @@ fn repeated_calls_share_values_and_same_revision_validity_survives_release() -> 
 fn a_space_edit_stops_at_equal_output_and_survives_reopening() -> Result<()> {
     let directory = tempfile::tempdir()?;
     let path = directory.path().join("queries");
-    let mut db = Database::open(&path, "test", inputs("fn main() {}"), (), retention())?;
+    let mut db = Database::open(&path, "test", inputs("fn main() {}"), (), test_options())?;
     db.run(|db| symbols(db, 1))?;
     db.replace_inputs(inputs("fn  main() {}"));
     let (result, events) =
@@ -187,7 +191,7 @@ fn a_space_edit_stops_at_equal_output_and_survives_reopening() -> Result<()> {
     assert_eq!(db.statistics().executed, 1, "tree ran; symbols did not");
     drop(db);
 
-    let mut db = Database::open(&path, "test", inputs("fn  main() {}"), (), retention())?;
+    let mut db = Database::open(&path, "test", inputs("fn  main() {}"), (), test_options())?;
     db.run(|db| symbols(db, 1))?;
     assert_eq!(db.statistics().executed, 0);
     assert_eq!(db.statistics().decoded, 1);
@@ -200,7 +204,7 @@ fn a_space_edit_stops_at_equal_output_and_survives_reopening() -> Result<()> {
 
 #[test]
 fn memory_storage_retains_typed_values_without_encoding() -> Result<()> {
-    let mut db = Database::memory(inputs("hello"), (), retention());
+    let mut db = Database::memory(inputs("hello"), (), test_options());
     let weak = db.run(|db| Ok(Arc::downgrade(&tree(db, 1)?)))?;
     assert!(
         weak.upgrade().is_some(),
@@ -234,7 +238,7 @@ fn forwarded_syntax(db: &Db) -> SharedResult<Syntax> {
 
 #[test]
 fn forwarding_reuses_input_and_non_cloneable_query_values() -> ajika::Result<()> {
-    let mut db = Database::memory(inputs("hello"), (), retention());
+    let mut db = Database::memory(inputs("hello"), (), test_options());
     db.run(|db| {
         let text = Settings::at(()).text(db)?;
         assert!(Arc::ptr_eq(&text, &forwarded_text(db)?));
@@ -253,10 +257,10 @@ fn parsed_length(db: &Db) -> ajika::Result<usize> {
 fn transient_intermediates_keep_replayable_dependency_records() -> Result<()> {
     let directory = tempfile::tempdir()?;
     let path = directory.path().join("queries");
-    let mut db = Database::open(&path, "test", inputs("hello"), (), retention())?;
+    let mut db = Database::open(&path, "test", inputs("hello"), (), test_options())?;
     db.run(parsed_length)?;
     drop(db);
-    let mut db = Database::open(&path, "test", inputs("hello"), (), retention())?;
+    let mut db = Database::open(&path, "test", inputs("hello"), (), test_options())?;
     assert_eq!(*db.run(parsed_length)?, 5);
     assert_eq!(db.statistics().executed, 0);
     assert_eq!(db.statistics().decoded, 1);
@@ -340,7 +344,7 @@ fn named_outputs_change_independently() -> Result<()> {
         "test",
         inputs("fn main() {}"),
         (),
-        retention(),
+        test_options(),
     )?;
     db.run(|db| {
         semantic(db)?;
@@ -419,7 +423,7 @@ fn equal_branch_changes_replace_old_dependencies() -> Result<()> {
         }
         .capture(),
         (),
-        retention(),
+        test_options(),
     );
     assert_eq!(*db.run(choose)?, 7);
     db.replace_inputs(
@@ -486,8 +490,7 @@ fn parallel_root(db: &Db, _key: u32) -> ajika::Result<u32> {
 #[test]
 fn nested_parallel_queries_share_work_at_one_two_and_four_workers() -> Result<()> {
     for workers in [1, 2, 4] {
-        let mut db = Database::memory(inputs(""), (), retention());
-        db.set_parallelism(workers);
+        let mut db = Database::memory(inputs(""), (), test_options().parallelism(workers));
         let (values, events) = diagnostics::capture(tracing::Level::DEBUG, || {
             db.run(|db| {
                 db.parallel_map(&(0..32).collect::<Vec<_>>(), |db, key| {

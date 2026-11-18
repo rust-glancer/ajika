@@ -5,7 +5,7 @@ pub(crate) mod workload;
 
 use std::{fmt, sync::Arc, time::Duration};
 
-use ajika::{Database, Retention};
+use ajika::{Database, DatabaseOptions, Retention};
 use divan::{Bencher, black_box};
 
 use self::workload::{Edit, Sources};
@@ -74,23 +74,24 @@ pub(crate) struct Fixture {
 
 impl Fixture {
     pub(crate) fn new(case: Case) -> Self {
+        Self::with_options(case, Self::options())
+    }
+
+    pub(crate) fn with_options(case: Case, options: DatabaseOptions) -> Self {
         let sources = Arc::new(Sources::new(case.files));
         let directory = matches!(case.backend, Backend::Disk)
             .then(|| Arc::new(tempfile::tempdir().expect("benchmark directory")));
-        let mut database = match &directory {
+        let database = match &directory {
             Some(directory) => Database::open(
                 directory.path(),
                 "bench-v1",
                 sources.saved.clone(),
                 (),
-                Self::retention(),
+                options,
             )
             .expect("benchmark database"),
-            None => Database::memory(sources.saved.clone(), (), Self::retention()),
+            None => Database::memory(sources.saved.clone(), (), options),
         };
-        // Query scheduling and checkpoint compression use the same worker limit. Fix both so
-        // CPU simulation follows serial work rather than a scheduling-dependent thread trace.
-        database.set_parallelism(1);
         Self {
             database,
             sources,
@@ -109,12 +110,14 @@ impl Fixture {
         fixture
     }
 
-    pub(crate) fn retention() -> Retention {
-        Retention {
+    pub(crate) fn options() -> DatabaseOptions {
+        // Use one worker so CPU simulation follows serial work regardless of the host.
+        DatabaseOptions::new(Retention {
             max_entries: 100_000,
             max_bytes: 1024 * 1024 * 1024,
             max_idle: Duration::from_secs(24 * 60 * 60),
-        }
+        })
+        .parallelism(1)
     }
 
     /// Rehearse once to verify the scenario, then give every measured iteration a fresh fixture.
@@ -159,15 +162,14 @@ impl SavedCache {
     }
 
     pub(crate) fn open(&self) -> Fixture {
-        let mut database = Database::open(
+        let database = Database::open(
             self.directory.path(),
             "bench-v1",
             self.sources.saved.clone(),
             (),
-            Fixture::retention(),
+            Fixture::options(),
         )
         .expect("reopen benchmark cache");
-        database.set_parallelism(1);
         Fixture {
             database,
             sources: self.sources.clone(),

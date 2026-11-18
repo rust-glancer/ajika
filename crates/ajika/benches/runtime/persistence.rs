@@ -63,3 +63,86 @@ fn reconstruct_transient(bencher: Bencher, files: u32) {
         },
     );
 }
+
+/// Measure the first request, a repeat of that request, and collection separately so we
+/// can see where the cost of writing moves. The query graph supplies the metadata and the
+/// selected outputs supply about 16 MiB of payloads before compression.
+mod write_behind {
+    use divan::Bencher;
+
+    use crate::support::{Case, Fixture, workload};
+
+    #[derive(Clone, Copy, Debug)]
+    enum Mode {
+        Eager,
+        Deferred,
+    }
+
+    impl Mode {
+        fn fixture(self) -> Fixture {
+            let options = Fixture::options();
+            let options = match self {
+                Self::Eager => options,
+                Self::Deferred => options.defer_checkpoints(64 * 1024 * 1024),
+            };
+            Fixture::with_options(Case::disk(512), options)
+        }
+    }
+
+    fn request(fixture: &mut Fixture) -> ajika::Result<u64> {
+        fixture.database.run(|db| {
+            let mut total = *workload::index(db)?;
+            for bytes in 1_048_576..1_048_592 {
+                total += workload::payloads(db, bytes)?.1.value(db)?.len() as u64;
+            }
+            Ok(total)
+        })
+    }
+
+    #[divan::bench(args = [Mode::Eager, Mode::Deferred], sample_count = 10, sample_size = 1)]
+    fn first(bencher: Bencher, mode: Mode) {
+        Fixture::bench(
+            bencher,
+            || mode.fixture(),
+            request,
+            |fixture, value| {
+                let index = fixture.sources.expected_index(workload::Edit::Original);
+                assert_eq!(*value, index + (1_048_576..1_048_592u64).sum::<u64>());
+            },
+        );
+    }
+
+    #[divan::bench(args = [Mode::Eager, Mode::Deferred], sample_count = 10, sample_size = 1)]
+    fn second(bencher: Bencher, mode: Mode) {
+        Fixture::bench(
+            bencher,
+            || {
+                let mut fixture = mode.fixture();
+                request(&mut fixture).expect("first request");
+                fixture
+            },
+            request,
+            |fixture, _| assert_eq!(fixture.database.statistics().executed, 0),
+        );
+    }
+
+    #[divan::bench(args = [Mode::Eager, Mode::Deferred], sample_count = 10, sample_size = 1)]
+    fn collect(bencher: Bencher, mode: Mode) {
+        Fixture::bench(
+            bencher,
+            || {
+                let mut fixture = mode.fixture();
+                request(&mut fixture).expect("first request");
+                request(&mut fixture).expect("second request");
+                fixture
+            },
+            |fixture| fixture.database.collect(),
+            |fixture, _| {
+                assert_eq!(
+                    fixture.database.statistics().stored_queries,
+                    Case::disk(512).query_count() + 16
+                );
+            },
+        );
+    }
+}

@@ -12,7 +12,7 @@ use super::support::{
 #[divan::bench(args = [32, 512, 8192], sample_count = 10, sample_size = 1)]
 fn edit_saved_inputs(bencher: Bencher, files: u32) {
     let sources = Sources::new(files);
-    let prepare = || Database::memory(sources.saved.clone(), (), Fixture::retention());
+    let prepare = || Database::memory(sources.saved.clone(), (), Fixture::options());
     let publish = |database: &mut Database| {
         database
             .update_inputs(|update| {
@@ -41,7 +41,7 @@ fn edit_saved_inputs(bencher: Bencher, files: u32) {
 #[divan::bench(args = [32, 512, 8192], sample_count = 10, sample_size = 1)]
 fn publish_editor_overlay(bencher: Bencher, files: u32) {
     let sources = Sources::new(files);
-    let prepare = || Database::memory(sources.saved.clone(), (), Fixture::retention());
+    let prepare = || Database::memory(sources.saved.clone(), (), Fixture::options());
     let publish = |database: &mut Database| {
         database.replace_inputs(sources.edited(Edit::Meaning, View::Draft));
     };

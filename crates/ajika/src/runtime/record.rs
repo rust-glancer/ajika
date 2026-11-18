@@ -100,14 +100,15 @@ pub(crate) enum Dependency {
 #[derive(Clone, PartialEq, Eq, SchemaRead, SchemaWrite)]
 pub(crate) struct ValueRecord {
     pub(crate) version: Version,
-    /// Encoded payload length after a disk checkpoint. [`None`] also covers values without a
-    /// disk payload: transient results, request-only results, and newly computed values.
+    /// Uncompressed length of the persistent payload. A pending write already knows
+    /// this length. A session that reuses the same version can read the queued value
+    /// now and use this length to read it from disk after commit. A session-only or
+    /// transient payload has no persistent length.
     pub(crate) length: Option<u64>,
 }
 
 impl ValueRecord {
     /// Assign an identity to an answer whose equality with the old answer is not known.
-    /// The payload has not been written yet; a disk checkpoint supplies its length if saved.
     pub(crate) fn fresh() -> Result<Self> {
         // Collection can remove the old record while a parent still remembers its version.
         // A fresh random token avoids accidentally reusing an old per-query counter value.
@@ -137,10 +138,13 @@ pub(crate) struct Record {
     pub(crate) address: Address,
     // First-read order matters: a changed branch condition must stop validation before
     // the runtime tries to replay dependencies from the branch that is no longer selected.
-    pub(crate) dependencies: Vec<Dependency>,
+    // Preparing a record for disk can share this list with readers, even for queries
+    // with thousands of dependencies.
+    pub(crate) dependencies: Arc<[Dependency]>,
     /// Last recorded use in Unix milliseconds, used for age-based collection rather than validity.
     pub(crate) last_used: u64,
-    /// Logical bytes charged to disk retention: this record's encoding plus its stored payloads.
+    /// Size used for retention. A session or pending entry counts the record and the
+    /// values it holds in RAM. A disk record counts the record and all its payloads.
     pub(crate) bytes: u64,
 }
 
