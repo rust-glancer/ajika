@@ -1,5 +1,19 @@
 # Changelog
 
+## [0.2.0](https://github.com/rust-glancer/ajika/compare/v0.1.7...v0.2.0) (2026-11-18)
+
+
+### ⚠ BREAKING CHANGES
+
+* More perf and storage improvements ([#28](https://github.com/rust-glancer/ajika/issues/28))
+* Implement deferred checkpoint mode ([#27](https://github.com/rust-glancer/ajika/issues/27))
+
+### Features
+
+* Implement deferred checkpoint mode ([#27](https://github.com/rust-glancer/ajika/issues/27)) ([5e701ff](https://github.com/rust-glancer/ajika/commit/5e701ff4850343db9154911bd3866e73a70c507f))
+* More perf and storage improvements ([#28](https://github.com/rust-glancer/ajika/issues/28)) ([3cbb854](https://github.com/rust-glancer/ajika/commit/3cbb854c279511313df37eaa839b2ba24c53234e))
+* Use crc32c instead of blake3 for checksum ([#25](https://github.com/rust-glancer/ajika/issues/25)) ([e236ed2](https://github.com/rust-glancer/ajika/commit/e236ed28c59fcef7b5408ed4d48e97bf14fba844))
+
 ## [0.1.7](https://github.com/rust-glancer/ajika/compare/v0.1.6...v0.1.7) (2026-11-12)
 
 
