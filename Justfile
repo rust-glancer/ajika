@@ -54,7 +54,9 @@ test-book:
     # Cached artifacts can lack CACHEDIR.TAG, so Cargo refuses to clean this directory itself.
     rm -rf -- target/book-tests
     cargo build -p ajika-word-count -p ajika-persistence -p ajika-outputs -p ajika-editor-session --locked --target-dir target/book-tests
-    mdbook test docs -L target/book-tests/debug/deps
+    # TODO: Drop this Cargo 1.100 glob once a stable mdBook can resolve the examples' dependencies.
+    # https://github.com/rust-lang/mdBook/issues/706
+    mdbook test docs -L "$(printf '%s\n' target/book-tests/debug/build/*/*/out | paste -sd, -)"
 
 build:
     cargo build --workspace --release --locked
