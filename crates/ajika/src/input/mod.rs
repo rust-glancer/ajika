@@ -6,11 +6,12 @@
 //! This lets file discovery happen inside a query without making ordinary input updates possible
 //! there. The application still decides how to acquire a file and whether its bytes are current.
 
+mod init;
 pub(crate) mod registry;
 mod table;
 
 use std::{
-    any::TypeId,
+    any::{Any, TypeId},
     borrow::Borrow,
     collections::{HashMap, HashSet},
     fmt,
@@ -19,31 +20,12 @@ use std::{
     sync::{Arc, RwLock},
 };
 
-use self::table::{ErasedTable, Table, Value};
-use crate::{
-    Durability, Error, Interner, Lifetime, Persist, Result, Stamp, UnavailableData, error::ensure,
+pub use self::init::InputInit;
+use self::{
+    init::{SnapshotInit, snapshot_state},
+    table::{ErasedTable, Table, Value},
 };
-
-/// Facilities available while capturing an input. An initializer can resolve or intern immutable
-/// IDs and check whether acquisition should stop. The captured value has no query dependencies
-/// of its own.
-pub trait InputInit {
-    /// Get a shared handle to the interner that owns the IDs in this input snapshot.
-    fn interner(&self) -> Interner;
-
-    /// Poll between chunks of acquisition and propagate the error to abandon the capture.
-    /// Query reads and validation use the active operation's check. Host-side reads through
-    /// a [`Database`](crate::Database) or [`Interner`] use the default check, which always succeeds.
-    fn check_cancelled(&self) -> Result<()> {
-        Ok(())
-    }
-}
-
-impl InputInit for Interner {
-    fn interner(&self) -> Interner {
-        self.clone()
-    }
-}
+use crate::{Durability, Error, Lifetime, Persist, Result, Stamp, UnavailableData, error::ensure};
 
 /// One field of a keyed input declaration. Prefer [`#[ajika::input]`](macro@crate::input), which
 /// generates this contract and typed getters/setters for each field of an ordinary struct.
@@ -124,6 +106,7 @@ pub(crate) struct Record {
 pub struct Inputs {
     tables: Arc<RwLock<HashMap<TypeId, Arc<dyn ErasedTable>>>>,
     base: Option<Arc<Inputs>>,
+    state: Option<Arc<dyn Any + Send + Sync>>,
 }
 
 impl fmt::Debug for Inputs {
@@ -136,6 +119,19 @@ impl fmt::Debug for Inputs {
 }
 
 impl Inputs {
+    /// Start an empty snapshot with application state for lazy initializers and explicit updates.
+    /// For example, both can use the same workspace roots to classify a file they capture.
+    /// Clones, edits and overlays share this value. To change it, start a fresh snapshot.
+    ///
+    /// Keep the state fixed for the life of the snapshot. Ajika tracks the resulting input
+    /// observations; mutating the state in place would leave earlier captures in use.
+    pub fn with_state<T: Send + Sync + 'static>(state: T) -> Self {
+        Self {
+            state: Some(Arc::new(state)),
+            ..Self::default()
+        }
+    }
+
     /// Prepare changes without exposing a partial batch. An error (or unwinding) drops the private
     /// changes. The original snapshot remains usable, including its previously captured lazy keys.
     pub fn edit(&self, edit: impl FnOnce(&mut InputUpdate) -> Result<()>) -> Result<Self> {
@@ -153,6 +149,7 @@ impl Inputs {
                     self.tables.read().expect("input tables").clone(),
                 )),
                 base: self.base.clone(),
+                state: self.state.clone(),
             },
             changed: HashSet::new(),
         };
@@ -168,6 +165,7 @@ impl Inputs {
     pub fn overlay(&self) -> Self {
         Self {
             base: Some(Arc::new(self.clone())),
+            state: self.state.clone(),
             ..Self::default()
         }
     }
@@ -176,6 +174,8 @@ impl Inputs {
     /// instead so Ajika records a dependency. This method is also useful during file discovery
     /// before the host installs the snapshot in a database. Pass the database or its interner as
     /// the acquisition context so any interned IDs resolve to the same identities in both places.
+    /// The initializer gets its application state from this snapshot even when the database
+    /// has another snapshot installed.
     pub fn get<T: Input>(&self, _: Field<T>, key: &T::Key, cx: &dyn InputInit) -> Result<T::Value> {
         Ok(self.read::<T>(key, cx)?.value)
     }
@@ -263,7 +263,11 @@ impl Inputs {
         }
         // Capture outside locks. A racing reader may have installed an observation in the
         // meantime, in which case use that same observation instead of our own capture.
-        let value = Value::<T>::new(T::initialize(key, cx)?)?;
+        let capture = SnapshotInit {
+            caller: cx,
+            state: self.state.as_deref(),
+        };
+        let value = Value::<T>::new(T::initialize(key, &capture)?)?;
         let table = self.ensure_table::<T>();
         let mut values = table.values.write().expect("input values");
         Ok(values
@@ -403,6 +407,12 @@ pub struct InputUpdate {
 }
 
 impl InputUpdate {
+    /// Borrow the value supplied to [`Inputs::with_state`] when preparing an explicit update.
+    /// Returns a contract error if the snapshot has no state of the requested type.
+    pub fn state<T: Send + Sync + 'static>(&self) -> Result<&T> {
+        snapshot_state(self.inputs.state.as_deref())
+    }
+
     pub fn set<T: Input>(&mut self, _: Field<T>, key: T::Key, value: T::Value) -> Result<()> {
         let value = Value::<T>::new(value)?;
         let table = self.table::<T>();

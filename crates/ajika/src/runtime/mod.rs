@@ -36,6 +36,8 @@ mod record;
 pub(crate) mod registry;
 pub(crate) mod value;
 
+use ajika_storage::Compression;
+
 use self::{
     backend::Backend,
     cache::{Memo, MemoTables},
@@ -48,7 +50,6 @@ pub use self::{
     options::DatabaseOptions,
     output::{Output, OutputSlot},
 };
-use ajika_storage::Compression;
 
 /// Host facilities available to queries without recording a dependency.
 /// Services may report progress or cancel a run. Data that determines query answers belongs
