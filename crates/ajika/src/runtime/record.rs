@@ -11,7 +11,7 @@ use ajika_storage::Id;
 use twox_hash::xxhash3_128::{RawHasher, SecretBuffer};
 use wincode::{SchemaRead, SchemaWrite};
 
-use crate::{Durability, Lifetime, Persist, Result, Stamp, codec, interner::FamilyId};
+use crate::{Durability, Error, Lifetime, Persist, Result, Stamp, codec, interner::FamilyId};
 
 /// Identifies one query call across recomputations. Its metadata uses this key in storage.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash)]
@@ -92,11 +92,15 @@ impl Address {
 /// output version. On reuse, Ajika makes the input or child current and compares this saved
 /// observation with the new one. Equal observations allow the parent to keep its old answer.
 #[derive(Debug, Clone, PartialEq, Eq, Hash, SchemaRead, SchemaWrite)]
+#[wincode(tag_encoding = "u8")]
 pub(crate) enum Dependency {
     /// The external observation this computation saw, such as a source file's content stamp.
     Input(Address, Stamp),
     /// The particular answer it used. Named outputs let siblings change independently.
     Value(Address, Slot, Version),
+    /// Only saved records contain IDs. The referenced row holds the full Input or Value,
+    /// including the arguments needed to replay an evicted child.
+    Shared(u32),
 }
 
 /// What validation and storage need to know about one output, without keeping its Rust value.
@@ -114,15 +118,15 @@ pub(crate) struct ValueRecord {
 
 impl ValueRecord {
     /// Assign an identity to an answer whose equality with the old answer is not known.
-    pub(crate) fn fresh() -> Result<Self> {
+    pub(crate) fn fresh() -> Self {
         // Collection can remove the old record while a parent still remembers its version.
         // A fresh random token avoids accidentally reusing an old per-query counter value.
         let mut version = [0; 16];
-        getrandom::fill(&mut version)?;
-        Ok(Self {
+        getrandom::fill(&mut version).expect("supported platforms provide OS randomness");
+        Self {
             version,
             length: None,
-        })
+        }
     }
 }
 
@@ -146,11 +150,47 @@ pub(crate) struct Record {
     // Preparing a record for disk can share this list with readers, even for queries
     // with thousands of dependencies.
     pub(crate) dependencies: Arc<[Dependency]>,
+    // Keep this last so startup can recover retention data without walking the dependency list.
+    pub(crate) footer: RecordFooter,
+}
+
+/// The final two fixed-width integers of a saved query record.
+#[derive(Clone, Copy, SchemaRead, SchemaWrite)]
+pub(crate) struct RecordFooter {
     /// Last recorded use in Unix milliseconds, used for age-based collection rather than validity.
     pub(crate) last_used: u64,
     /// Size used for retention. A session or pending entry counts the record and the
-    /// values it holds in RAM. A disk record counts the record and all its payloads.
+    /// values it holds in RAM. A disk record counts the inline cost of its reads and uncompressed payloads.
+    /// Its retention cost stays independent of which other queries share those reads.
     pub(crate) bytes: u64,
+}
+
+impl RecordFooter {
+    const ENCODED_LEN: usize = match <Self as SchemaWrite<codec::Config>>::TYPE_META {
+        wincode::TypeMeta::Static { size, .. } => size,
+        wincode::TypeMeta::Dynamic => {
+            panic!("the query record footer must have a fixed encoded size")
+        }
+    };
+
+    pub(crate) fn from_record(record: &[u8]) -> Result<Self> {
+        // Wincode writes struct fields consecutively in declaration order, and our codec
+        // uses fixed-width integers. Keeping Record::footer last puts its two u64s in the
+        // final 16 bytes, so startup can read them without decoding the dependency list.
+        let tail = record
+            .last_chunk::<{ Self::ENCODED_LEN }>()
+            .ok_or_else(|| {
+                Error::invalid_cache("query record is too short for its retention footer")
+            })?;
+        let footer: Self = codec::decode(tail)?;
+        // On disk the byte budget includes the metadata row itself and any stored payloads.
+        if footer.bytes < record.len() as u64 {
+            return Err(Error::invalid_cache(
+                "query size is smaller than its metadata",
+            ));
+        }
+        Ok(footer)
+    }
 }
 
 /// A query call's output metadata: slots, versions, stored payload lengths, and policies.

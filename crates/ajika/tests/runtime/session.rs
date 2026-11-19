@@ -51,6 +51,62 @@ fn answer(db: &Db) -> ajika::Result<String> {
     Ok(format!("answer:{}", document(db)?.0.value(db)?))
 }
 
+#[ajika::query]
+fn word_length(db: &Db, index: usize) -> ajika::Result<usize> {
+    Ok(Document::at(())
+        .source(db)?
+        .text
+        .split_whitespace()
+        .nth(index)
+        .map_or(0, str::len))
+}
+
+#[test]
+fn all_callers_inherit_a_shared_inputs_new_lifetime() -> Result<()> {
+    let directory = tempfile::tempdir()?;
+    let input = |lifetime| {
+        Source {
+            text: "a bb ccc dddd",
+            lifetime,
+        }
+        .capture()
+    };
+    let read = |cx: &Db| {
+        for i in 0..4 {
+            assert_eq!(*word_length(cx, i)?, i + 1);
+        }
+        Ok(())
+    };
+
+    let mut db = Database::open(
+        directory.path(),
+        "test",
+        input(Lifetime::Persistent),
+        (),
+        test_options(),
+    )?;
+    db.run(read)?;
+    drop(db);
+
+    // Opening an editor buffer with identical text changes its lifetime but preserves
+    // its stamp. Every caller now belongs to the session, including those reusing a check.
+    let mut db = Database::open(
+        directory.path(),
+        "test",
+        input(Lifetime::Session),
+        (),
+        test_options(),
+    )?;
+    db.run(read)?;
+    assert_eq!(db.statistics().executed, 0);
+    assert_eq!(db.statistics().session_queries, 4);
+    db.replace_inputs(input(Lifetime::Persistent));
+    db.run(read)?;
+    assert_eq!(db.statistics().executed, 0);
+    assert_eq!(db.statistics().session_queries, 0);
+    Ok(())
+}
+
 #[ajika::input(key = (), lifetime = Operation)]
 struct Request {
     label: String,

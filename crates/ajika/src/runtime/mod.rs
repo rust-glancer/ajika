@@ -18,7 +18,10 @@ use std::{
     time::{Duration, Instant},
 };
 
-use crate::{Error, InputInit, Interner, Result, Retention, Statistics};
+use crate::{
+    Durability, Error, InputInit, Inputs, Interner, Lifetime, Result, Retention, Statistics,
+    StorageStatistics,
+};
 
 mod backend;
 mod cache;
@@ -32,6 +35,8 @@ mod parallel;
 mod record;
 pub(crate) mod registry;
 pub(crate) mod value;
+
+use ajika_storage::Compression;
 
 use self::{
     backend::Backend,
@@ -75,7 +80,7 @@ impl Services for () {}
 /// Only changed inputs or input policies advance the revision. Operations and replacements are exclusive
 /// on this owner; parallel query work happens inside an operation.
 pub struct Database<S: Services = ()> {
-    inputs: crate::Inputs,
+    inputs: Inputs,
     services: S,
     backend: Backend,
     registry: Registry<S>,
@@ -97,7 +102,7 @@ impl<S: Services> Database<S> {
     /// Answers of persistent-policy queries can survive between operations in this database instance;
     /// transient query values and request-only results are still released at operation end.
     /// Disk-only options are ignored.
-    pub fn memory(inputs: crate::Inputs, services: S, options: DatabaseOptions) -> Self {
+    pub fn memory(inputs: Inputs, services: S, options: DatabaseOptions) -> Self {
         Self::new(inputs, services, Backend::memory(), options)
     }
 
@@ -111,7 +116,7 @@ impl<S: Services> Database<S> {
     pub fn open(
         path: impl AsRef<Path>,
         epoch: &str,
-        inputs: crate::Inputs,
+        inputs: Inputs,
         services: S,
         options: DatabaseOptions,
     ) -> Result<Self> {
@@ -123,7 +128,7 @@ impl<S: Services> Database<S> {
         ))
     }
 
-    fn new(inputs: crate::Inputs, services: S, backend: Backend, options: DatabaseOptions) -> Self {
+    fn new(inputs: Inputs, services: S, backend: Backend, options: DatabaseOptions) -> Self {
         Self {
             inputs,
             services,
@@ -171,24 +176,24 @@ impl<S: Services> Database<S> {
 
     /// Choose the space/CPU policy for future disk writes. Existing values keep their own codec.
     /// Memory storage does not encode values and ignores this setting.
-    pub fn set_compression(&mut self, compression: crate::Compression) {
+    pub fn set_compression(&mut self, compression: Compression) {
         self.backend.set_compression(compression);
     }
 
     /// Inspect physical storage without decoding query values. This scans storage metadata,
     /// so use it for diagnostics. Returns `None` for memory storage.
-    pub fn storage_statistics(&self) -> Result<Option<crate::StorageStatistics>> {
+    pub fn storage_statistics(&self) -> Result<Option<StorageStatistics>> {
         self.backend.storage_statistics()
     }
 
     /// Get the shared interner for source capture or query providers.
     /// Open the database before constructing inputs that contain its IDs, then keep using this
     /// interner across input revisions. Reopening loads the saved assignments before returning.
-    pub fn interner(&self) -> crate::Interner {
+    pub fn interner(&self) -> Interner {
         self.backend.interner.clone()
     }
 
-    pub fn inputs(&self) -> &crate::Inputs {
+    pub fn inputs(&self) -> &Inputs {
         &self.inputs
     }
 
@@ -484,6 +489,8 @@ struct Operation<'db, S: Services> {
     database: &'db Database<S>,
     memos: MemoTables,
     touched: Mutex<HashMap<QueryId, Arc<Memo>>>,
+    // A proof belongs to this operation's captured inputs and includes their current policies.
+    checked_observations: Mutex<HashMap<u32, (Durability, Lifetime)>>,
     statistics: Mutex<Statistics>,
     spare: AtomicUsize,
     now: u64,
@@ -497,6 +504,7 @@ impl<'db, S: Services> Operation<'db, S> {
             database,
             memos: MemoTables::default(),
             touched: Mutex::default(),
+            checked_observations: Mutex::default(),
             statistics: Mutex::new(statistics),
             spare: AtomicUsize::new(database.parallelism - 1),
             now: Backend::now(),
@@ -541,7 +549,7 @@ pub struct Db<'operation, S: Services = ()> {
 
 impl<S: Services> Db<'_, S> {
     /// Access the shared interner without recording a query dependency.
-    pub fn interner(&self) -> crate::Interner {
+    pub fn interner(&self) -> Interner {
         self.operation.database.interner()
     }
 

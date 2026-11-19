@@ -1,6 +1,6 @@
 //! Host edits, query reads and restart validation use the same typed field declarations.
 
-use std::{fs, sync::Arc};
+use std::{fs, path::PathBuf, sync::Arc};
 
 use ajika::{Database, Durability, InputInit, Inputs, Interner, Lifetime, Stamp};
 use anyhow::Result;
@@ -45,9 +45,10 @@ fn text(db: &Db) -> ajika::Result<String> {
 #[test]
 fn field_updates_are_private_until_published_and_saved_inputs_can_be_restored() -> Result<()> {
     let package = Package::at(1);
-    let saved = Inputs::default().edit(|update| {
+    let saved = Inputs::with_state(2024_u32).edit(|update| {
         package.set_text(update, "saved".into())?;
-        package.set_edition(update, 2024)
+        let default_edition = *update.state::<u32>()?;
+        package.set_edition(update, default_edition)
     })?;
     let mut database = Database::memory(saved.clone(), (), test_options());
     database.run(edition)?;
@@ -116,8 +117,9 @@ struct File {
 impl File {
     fn load(id: &FileId, cx: &dyn InputInit) -> ajika::Result<String> {
         cx.check_cancelled()?;
-        let path = id.path(&cx.interner())?;
-        fs::read_to_string(path).map_err(ajika::Error::application)
+        let root = cx.state::<PathBuf>()?;
+        let name = id.path(&cx.interner())?;
+        fs::read_to_string(root.join(name)).map_err(ajika::Error::application)
     }
 }
 
@@ -129,21 +131,21 @@ fn length(db: &Db, id: FileId) -> ajika::Result<usize> {
 #[test]
 fn lazy_inputs_are_shared_with_the_host_and_recaptured_on_restart() -> Result<()> {
     let directory = tempfile::tempdir()?;
-    let path = directory
-        .path()
-        .join("source")
-        .to_str()
-        .expect("temporary path")
-        .to_owned();
     let storage = directory.path().join("queries");
-    for (contents, expected_executions) in [("one", 1), ("one", 0), ("longer", 1)] {
-        fs::write(&path, contents)?;
-        let sources = Inputs::default();
+    for (root_name, contents, expected_executions) in [
+        ("first", "one", 1),
+        ("second", "one", 0),
+        ("second", "longer", 1),
+    ] {
+        let root = directory.path().join(root_name);
+        fs::create_dir_all(&root)?;
+        fs::write(root.join("source"), contents)?;
+        let sources = Inputs::with_state(root);
         // The database adds configuration over these source tables. A hit must still capture
         // the source in those tables so the host can validate it before accepting its project.
         let mut database =
             Database::open(&storage, "inputs", sources.overlay(), (), test_options())?;
-        let id = FileId::new(&database.interner(), path.clone())?;
+        let id = FileId::new(&database.interner(), "source".to_owned())?;
         let file = File::at(id);
         assert_eq!(*database.run(|db| length(db, id))?, contents.len());
         assert_eq!(database.statistics().executed, expected_executions);
@@ -185,16 +187,13 @@ fn editor_overrides_leave_the_saved_values_and_other_files_shared() -> Result<()
 #[test]
 fn forgetting_an_observation_recaptures_it_without_changing_the_saved_snapshot() -> Result<()> {
     let directory = tempfile::tempdir()?;
-    let path = directory
-        .path()
-        .join("source")
-        .to_string_lossy()
-        .into_owned();
+    let path = directory.path().join("source");
     fs::write(&path, "before")?;
-    let saved = Inputs::default();
-    let database = Database::memory(saved.clone(), (), test_options());
+    let saved = Inputs::with_state(directory.path().to_owned());
+    // The host can prepare this snapshot before it becomes the database's active view.
+    let database = Database::memory(Inputs::default(), (), test_options());
     let interner = database.interner();
-    let id = FileId::new(&interner, path.clone())?;
+    let id = FileId::new(&interner, "source".to_owned())?;
     assert_eq!(&*saved.get(File::TEXT, &id, &database)?, "before");
 
     fs::write(&path, "after")?;

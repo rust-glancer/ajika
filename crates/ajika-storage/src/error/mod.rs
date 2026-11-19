@@ -276,12 +276,6 @@ index_error!(
     redb::CompactionError
 );
 
-impl From<getrandom::Error> for Error {
-    fn from(source: getrandom::Error) -> Self {
-        Self::unexpected(source)
-    }
-}
-
 impl From<lz4_flex::frame::Error> for Error {
     fn from(source: lz4_flex::frame::Error) -> Self {
         Self::unexpected(source)

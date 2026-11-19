@@ -46,6 +46,38 @@ An initializer captures external data. During a query read or cache validation,
 `check_cancelled()` polls the active operation. For long acquisitions, call it
 between chunks and return the error to abandon the capture.
 
+## Give initializers workspace configuration
+
+If file IDs are relative to a workspace, give the input snapshot its root when
+you create it. The host can then use the same field declaration for two open
+workspaces, each resolving `src/lib.rs` under its own root.
+
+```rust
+# extern crate ajika;
+use std::path::PathBuf;
+use ajika::{InputInit, Inputs};
+
+struct WorkspaceRoot(PathBuf);
+
+#[ajika::input(key = String)]
+struct File {
+    #[input(initialize = read_text)]
+    text: String,
+}
+
+fn read_text(name: &str, cx: &dyn InputInit) -> ajika::Result<String> {
+    let root = cx.state::<WorkspaceRoot>()?;
+    std::fs::read_to_string(root.0.join(name)).map_err(ajika::Error::application)
+}
+
+let inputs = Inputs::with_state(WorkspaceRoot(PathBuf::from("my-project")));
+```
+
+An explicit setter can use `update.state::<WorkspaceRoot>()?` inside an input
+edit. Clones, edits and overlays all share the state. To switch roots, create
+fresh inputs. When reopening a cache, supply the root again so validation can
+capture files from the intended workspace.
+
 ## The host decides when to reacquire
 
 Filesystem notifications are an application concern. On a change, either install

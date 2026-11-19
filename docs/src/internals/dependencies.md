@@ -28,7 +28,7 @@ version.
 
 An input getter records the field address and stamp instead. An `Output::value`
 read records the producer address, selected slot, and that slot's version.
-These cases become the two variants of [`Dependency`](https://github.com/rust-glancer/ajika/blob/main/crates/ajika/src/runtime/record.rs#L82).
+The frame records both kinds of read as a [`Dependency`](https://github.com/rust-glancer/ajika/blob/main/crates/ajika/src/runtime/record.rs#L82).
 
 The frame also accumulates the least durability and lifetime of its observations.
 Those policies flow transitively through children without copying their entire
@@ -68,6 +68,18 @@ query with no record of that read.
 
 At the host root, the frame has no query owner. Host reads do not create another
 stored producer, though queries called by the host still track their own reads.
+
+## Sharing the same observation on disk
+
+If many callers read `words("notes.txt")` at W1, a disk checkpoint can store
+that observation once. Each caller keeps a five-byte reference at the position
+where it made the read. One-off reads stay inline. When the last caller is
+replaced or collected, the same transaction removes the shared observation.
+
+Validation loads a shared observation when it reaches that read. Once the
+version matches, later callers in the same operation can reuse the check,
+including the durability and lifetime it found. The operation releases these
+checks when it finishes.
 
 ## Parallel branches are parts of their caller
 

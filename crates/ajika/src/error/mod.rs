@@ -322,12 +322,6 @@ impl From<std::num::TryFromIntError> for Error {
     }
 }
 
-impl From<getrandom::Error> for Error {
-    fn from(source: getrandom::Error) -> Self {
-        Self::unexpected(source)
-    }
-}
-
 /// Apply [`Error::context`] while propagating a failed result.
 pub trait ResultExt: Sized {
     fn context(self, message: impl Into<String>) -> Self;

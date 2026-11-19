@@ -135,7 +135,7 @@ impl<'a> PackWriter<'a> {
         }
         if self.current.is_none() {
             self.reserve(PackHeader::LENGTH)?;
-            let id = format::new_id()?;
+            let id = format::new_id();
             let path = Self::path(self.directory, &id);
             let file = File::create_new(&path)?;
             self.created.push(path);

@@ -21,12 +21,13 @@ use ajika_storage::Database as StorageDatabase;
 
 use super::{
     cache::Memo,
-    record::{QueryId, Record, RecordHeader, Slot, ValueId},
+    record::{Dependency, QueryId, Record, RecordFooter, RecordHeader, Slot, ValueId},
     value::{Codec, Value},
 };
 use crate::{DatabaseOptions, Error, Lifetime, Result, Retention, Statistics, codec};
 
 mod encoding;
+mod observations;
 mod resident;
 use self::{encoding::PendingValue, resident::ResidentStore};
 
@@ -61,9 +62,10 @@ impl Stored {
             }
         }
         values.retain(|_, value| value.codec.is_some());
-        record.bytes = codec::encoded_size(&record)?;
+        record.footer.bytes = codec::encoded_size(&record)?;
         for value in values.values() {
-            record.bytes += (value.codec.expect("retained payload codec").size)(&value.data)?;
+            record.footer.bytes +=
+                (value.codec.expect("retained payload codec").size)(&value.data)?;
         }
         Ok(Self {
             record: Arc::new(record),
@@ -86,6 +88,13 @@ struct Usage {
     verified: u64,
 }
 
+/// Reconstructed from one disk snapshot when opening or repairing the cache.
+#[derive(Default)]
+struct DiskInventory {
+    entries: HashMap<QueryId, Usage>,
+    bytes: u64,
+}
+
 enum Store {
     Memory(Mutex<HashMap<QueryId, Stored>>),
     Disk(Box<StorageDatabase>),
@@ -104,6 +113,7 @@ struct PreparedCheckpoint {
 struct DiskChanges {
     records: Vec<MetadataWrite>,
     removed_values: Vec<ValueId>,
+    released_observations: HashMap<u32, u32>,
     payloads: Vec<PendingValue>,
 }
 
@@ -119,6 +129,7 @@ impl DiskChanges {
         original: Option<&Record>,
     ) -> Result<Arc<Record>> {
         if let Some(previous) = original {
+            previous.count_shared(&mut self.released_observations);
             for (slot, value) in &previous.header.values {
                 if !record.header.values.contains_key(slot) && value.length.is_some() {
                     self.removed_values.push(id.value_id(slot));
@@ -154,7 +165,7 @@ impl DiskChanges {
                 output.length = None;
             }
         }
-        record.bytes = record
+        record.footer.bytes = record
             .header
             .values
             .values()
@@ -222,7 +233,7 @@ impl Deferred {
             };
             bytes += length;
         }
-        record.bytes = bytes + codec::encoded_size(&record)?;
+        record.footer.bytes = bytes + codec::encoded_size(&record)?;
         Ok(Stored {
             record: Arc::new(record),
             values,
@@ -268,8 +279,8 @@ impl Backend {
         // The runtime's record schema has its own version, separate from the storage
         // adapter and the application's persisted query types.
         let mut database =
-            StorageDatabase::open(path, &format!("query-runtime-4:{epoch}"), options.storage)?;
-        let (interner, usage) = match Self::load_interner(&mut database) {
+            StorageDatabase::open(path, &format!("query-runtime-5:{epoch}"), options.storage)?;
+        let (interner, inventory) = match Self::load_interner(&mut database) {
             Ok(interner) => {
                 let loaded = Self::load_usage(&database);
                 let usage = Self::reuse_or_rebuild_usage(&mut database, &interner, loaded)?;
@@ -281,7 +292,6 @@ impl Backend {
             }
             Err(error) => return Err(error),
         };
-        let bytes = usage.values().map(|item| item.bytes).sum();
         Ok(Self {
             interner,
             store: Store::Disk(Box::new(database)),
@@ -290,9 +300,9 @@ impl Backend {
                 max_bytes,
             }),
             session: Mutex::default(),
-            usage: Mutex::new(usage),
+            usage: Mutex::new(inventory.entries),
             recovery: OnceLock::new(),
-            bytes: AtomicU64::new(bytes),
+            bytes: AtomicU64::new(inventory.bytes),
         })
     }
 
@@ -317,8 +327,8 @@ impl Backend {
     fn reuse_or_rebuild_usage(
         database: &mut StorageDatabase,
         interner: &crate::Interner,
-        loaded: Result<HashMap<QueryId, Usage>>,
-    ) -> Result<HashMap<QueryId, Usage>> {
+        loaded: Result<DiskInventory>,
+    ) -> Result<DiskInventory> {
         match loaded {
             Err(error) if error.is_invalid_cache() => {
                 Self::rebuild_corrupt_cache(database, Some(interner), &error)
@@ -331,7 +341,7 @@ impl Backend {
         database: &mut StorageDatabase,
         interner: Option<&crate::Interner>,
         error: &Error,
-    ) -> Result<HashMap<QueryId, Usage>> {
+    ) -> Result<DiskInventory> {
         match interner {
             Some(interner) => interner.rebuild(database)?,
             None => database.rebuild(&[])?,
@@ -343,27 +353,33 @@ impl Backend {
             identities_discarded = interner.is_none(),
             "discarded corrupt cache contents"
         );
-        Ok(HashMap::new())
+        Ok(DiskInventory::default())
     }
 
-    fn load_usage(database: &StorageDatabase) -> Result<HashMap<QueryId, Usage>> {
-        let mut usage = HashMap::new();
-        // Restart needs sizes and last-use times to enforce retention. Decode each record
-        // only long enough to extract those fields; dependency lists are not retained here,
-        // and query payloads are not loaded at all.
-        for (id, bytes) in database.snapshot()?.records()? {
-            let record: Record = codec::decode(&bytes)?;
-            usage.insert(
-                QueryId(id),
-                Usage {
-                    used: record.last_used,
-                    used_dirty: false,
-                    bytes: record.bytes,
-                    verified: 0,
-                },
-            );
-        }
-        Ok(usage)
+    fn load_usage(database: &StorageDatabase) -> Result<DiskInventory> {
+        let mut inventory = DiskInventory::default();
+        // Opening needs only the cost and age of each saved query. Its next request will
+        // decode the full record and validate its dependencies against the new inputs.
+        database
+            .snapshot()?
+            .visit_records(|id, row| -> Result<()> {
+                let footer = RecordFooter::from_record(row)?;
+                inventory.bytes = inventory
+                    .bytes
+                    .checked_add(footer.bytes)
+                    .ok_or_else(|| Error::invalid_cache("total stored query size overflowed"))?;
+                inventory.entries.insert(
+                    QueryId(id),
+                    Usage {
+                        used: footer.last_used,
+                        used_dirty: false,
+                        bytes: footer.bytes,
+                        verified: 0,
+                    },
+                );
+                Ok(())
+            })?;
+        Ok(inventory)
     }
 
     pub(crate) fn recovery_pending(&self) -> bool {
@@ -395,7 +411,7 @@ impl Backend {
         Ok(())
     }
 
-    fn replace_usage(&mut self, usage: HashMap<QueryId, Usage>) {
+    fn replace_usage(&mut self, inventory: DiskInventory) {
         // Both session and pending records can refer to outputs in the old disk cache.
         // After recovery or invalidation those references may point to missing or different
         // values. Start both maps empty and validate any recovered records on demand.
@@ -403,11 +419,8 @@ impl Backend {
         if let Some(mut pending) = self.pending() {
             pending.clear();
         }
-        self.bytes.store(
-            usage.values().map(|item| item.bytes).sum(),
-            Ordering::Relaxed,
-        );
-        *self.usage.get_mut().expect("storage usage") = usage;
+        self.bytes.store(inventory.bytes, Ordering::Relaxed);
+        *self.usage.get_mut().expect("storage usage") = inventory.entries;
     }
 
     /// A last-use time that can be saved and compared after restarting. Process-local
@@ -745,6 +758,7 @@ impl Backend {
     ) -> Result<PreparedCheckpoint> {
         let mut prepared = Vec::with_capacity(dirty.len());
         let mut disk = DiskChanges::default();
+        let mut observations = self.observations();
         for &memo in dirty {
             check()?;
             // Evaluation is over. Move the record and its values out of the memo while
@@ -758,7 +772,21 @@ impl Backend {
                 (record, std::mem::take(&mut state.values))
             };
             let mut record = Arc::unwrap_or_clone(record);
-            record.last_used = now;
+            // A session or pending record can outlive the disk row from which it was
+            // validated. Give it its own observations before any old references are released.
+            // Freshly executed queries already hold their reads inline.
+            if record
+                .dependencies
+                .iter()
+                .any(|dep| matches!(dep, Dependency::Shared(_)))
+            {
+                for dep in Arc::make_mut(&mut record.dependencies) {
+                    if let Dependency::Shared(_) = dep {
+                        *dep = observations.resolve(dep)?.into_owned();
+                    }
+                }
+            }
+            record.footer.last_used = now;
             // Saving the exact text that's open in an editor can change a query's lifetime
             // without running it again. Its memo may be missing values that now need to be
             // saved. Pick up the edited values before replacing the session entry.
@@ -776,7 +804,7 @@ impl Backend {
                 (Lifetime::Persistent, Store::Memory(store)) => {
                     // Keep the complete typed replacement, including unloaded values from
                     // the old entry. Memory storage does not charge encoded disk bytes.
-                    record.bytes = 0;
+                    record.footer.bytes = 0;
                     let mut memory_values = store
                         .lock()
                         .expect("memory storage")
@@ -836,15 +864,13 @@ impl Backend {
                     check()?;
                     write.remove_value(&id.0)?;
                 }
-                for record in &disk.records {
-                    check()?;
-                    // Release each encoded record after the writer copies it. Retaining the
-                    // whole batch would keep a second copy of the dependency graph alive while
-                    // payloads are encoded. Publication still waits for the transaction to commit.
-                    let bytes = codec::encode(record.record.as_ref())?;
-                    stats.metadata_writes += 1;
-                    stats.metadata_bytes_written += bytes.len() as u64;
-                    write.set_metadata(&record.id.0, &bytes)?;
+                write.release_shared_metadata(
+                    disk.released_observations
+                        .iter()
+                        .map(|(&id, &count)| (id, count)),
+                )?;
+                for group in disk.records.chunks(4096) {
+                    MetadataWrite::write_group(group, &mut write, stats, check)?;
                 }
                 stats.bytes_written += PendingValue::write_all(
                     &disk.payloads,
@@ -880,7 +906,7 @@ impl Backend {
                 continue;
             }
 
-            let bytes = stored.record.bytes;
+            let bytes = stored.record.footer.bytes;
             if let Store::Memory(store) = &self.store {
                 store.lock().expect("memory storage").insert(id, stored);
             }
@@ -936,7 +962,7 @@ impl Backend {
                     None
                 };
                 let mut record = stored.record.as_ref().clone();
-                record.last_used = used;
+                record.footer.last_used = used;
                 disk.replace(id, record, &stored.values, original.as_ref())?;
             }
             Ok(())
@@ -957,15 +983,15 @@ impl Backend {
         let usage = self.usage.get_mut().expect("storage usage");
         for MetadataWrite { id, record } in disk.records {
             let replacement = Usage {
-                bytes: record.bytes,
-                used: record.last_used,
+                bytes: record.footer.bytes,
+                used: record.footer.last_used,
                 used_dirty: false,
                 verified: pending.verified(&id).expect("drained record is pending"),
             };
             let old = usage.insert(id, replacement);
             self.bytes
                 .fetch_sub(old.map_or(0, |item| item.bytes), Ordering::Relaxed);
-            self.bytes.fetch_add(record.bytes, Ordering::Relaxed);
+            self.bytes.fetch_add(record.footer.bytes, Ordering::Relaxed);
         }
         pending.clear();
         Ok(())
@@ -1021,7 +1047,7 @@ impl Backend {
                         .filter(|(slot, _)| !stored.values.contains_key(*slot))
                         .filter_map(|(_, output)| output.length)
                         .sum();
-                    ordered.push((id, used, stored.record.bytes + backed_bytes));
+                    ordered.push((id, used, stored.record.footer.bytes + backed_bytes));
                 }
             }
         }
@@ -1059,6 +1085,7 @@ impl Backend {
                         .peekable();
                     if changes.peek().is_some() {
                         let mut write = database.begin_write()?;
+                        let mut released = HashMap::new();
                         // Read through the writer so each encoded record can be released before
                         // loading the next. A separate snapshot would prevent exclusive writes.
                         for (id, item) in changes {
@@ -1072,12 +1099,14 @@ impl Backend {
                                         write.remove_value(&id.value_id(slot).0)?;
                                     }
                                 }
+                                record.count_shared(&mut released);
                                 write.remove_metadata(&id.0)?;
                             } else {
-                                record.last_used = item.used;
+                                record.footer.last_used = item.used;
                                 write.set_metadata(&id.0, &codec::encode(&record)?)?;
                             }
                         }
+                        write.release_shared_metadata(released.into_iter())?;
                         write.commit()?;
                     }
                 }
@@ -1135,7 +1164,7 @@ impl Backend {
         };
         self.observe(result)?;
         self.recovery.take();
-        self.replace_usage(HashMap::new());
+        self.replace_usage(DiskInventory::default());
         Ok(())
     }
 

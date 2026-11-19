@@ -13,7 +13,7 @@ use redb::{ReadableDatabase, ReadableTable};
 
 use crate::{
     Database, Error, Result,
-    format::{self, IDENTITIES, Location, PACKS, PackHeader, PackInfo, RECORDS, VALUES},
+    format::{self, IDENTITIES, Location, PACKS, PackHeader, PackInfo, RECORDS, SHARED, VALUES},
 };
 
 /// Logical contents and filesystem usage at the same observation boundary.
@@ -21,6 +21,7 @@ use crate::{
 #[derive(Debug, Default, Clone, Copy)]
 pub struct Statistics {
     pub records: u64,
+    /// Metadata row contents, including shared fragments, their IDs and reference counts.
     pub record_bytes: u64,
     pub identity_bytes: u64,
     pub location_bytes: u64,
@@ -59,6 +60,17 @@ impl Statistics {
             let (_, value) = entry?;
             stats.records += 1;
             stats.record_bytes += value.value().len() as u64;
+        }
+        // The first shared fragment creates this table. Small caches can stay entirely inline.
+        match read.open_table(SHARED) {
+            Ok(table) => {
+                for entry in table.iter()? {
+                    let (_, value) = entry?;
+                    stats.record_bytes += 4 + 4 + value.value().1.len() as u64;
+                }
+            }
+            Err(redb::TableError::TableDoesNotExist(_)) => {}
+            Err(error) => return Err(error.into()),
         }
         for entry in read.open_table(IDENTITIES)?.iter()? {
             let (key, value) = entry?;

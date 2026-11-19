@@ -15,6 +15,9 @@ use crate::{Compression, Error, Id, Result};
 pub(crate) const FORMAT: &str = "ajika-packs-3";
 pub(crate) const HEADER: TableDefinition<&str, &[u8]> = TableDefinition::new("header");
 pub(crate) const RECORDS: TableDefinition<&Id, &[u8]> = TableDefinition::new("records");
+// Each immutable metadata fragment has a count of the references in live records.
+pub(crate) const SHARED: TableDefinition<u32, (u32, &[u8])> =
+    TableDefinition::new("shared_metadata");
 pub(crate) const IDENTITIES: TableDefinition<(&str, u32), &[u8]> =
     TableDefinition::new("identities");
 pub(crate) const VALUES: TableDefinition<&Id, &[u8]> = TableDefinition::new("values");
@@ -95,8 +98,8 @@ pub(crate) fn decode<T: SchemaReadOwned<DefaultConfig, Dst = T>>(bytes: &[u8]) -
     wincode::deserialize_exact(bytes).map_err(Error::invalid_source)
 }
 
-pub(crate) fn new_id() -> Result<[u8; 16]> {
+pub(crate) fn new_id() -> [u8; 16] {
     let mut id = [0; 16];
-    getrandom::fill(&mut id)?;
-    Ok(id)
+    getrandom::fill(&mut id).expect("supported platforms provide OS randomness");
+    id
 }

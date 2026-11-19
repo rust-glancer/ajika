@@ -90,6 +90,7 @@ impl<S: Services> Operation<'_, S> {
             let (address, slot, kind) = match dependency {
                 Dependency::Input(address, _) => (address, &None, "input"),
                 Dependency::Value(address, slot, _) => (address, slot, "query"),
+                Dependency::Shared(_) => unreachable!("diagnostics receive a resolved observation"),
             };
             let id = parent.id();
             let child = address.id();
