@@ -92,11 +92,15 @@ impl Address {
 /// output version. On reuse, Ajika makes the input or child current and compares this saved
 /// observation with the new one. Equal observations allow the parent to keep its old answer.
 #[derive(Debug, Clone, PartialEq, Eq, Hash, SchemaRead, SchemaWrite)]
+#[wincode(tag_encoding = "u8")]
 pub(crate) enum Dependency {
     /// The external observation this computation saw, such as a source file's content stamp.
     Input(Address, Stamp),
     /// The particular answer it used. Named outputs let siblings change independently.
     Value(Address, Slot, Version),
+    /// Only saved records contain IDs. The referenced row holds the full Input or Value,
+    /// including the arguments needed to replay an evicted child.
+    Shared(u32),
 }
 
 /// What validation and storage need to know about one output, without keeping its Rust value.
@@ -114,15 +118,15 @@ pub(crate) struct ValueRecord {
 
 impl ValueRecord {
     /// Assign an identity to an answer whose equality with the old answer is not known.
-    pub(crate) fn fresh() -> Result<Self> {
+    pub(crate) fn fresh() -> Self {
         // Collection can remove the old record while a parent still remembers its version.
         // A fresh random token avoids accidentally reusing an old per-query counter value.
         let mut version = [0; 16];
-        getrandom::fill(&mut version)?;
-        Ok(Self {
+        getrandom::fill(&mut version).expect("supported platforms provide OS randomness");
+        Self {
             version,
             length: None,
-        })
+        }
     }
 }
 
@@ -156,7 +160,8 @@ pub(crate) struct RecordFooter {
     /// Last recorded use in Unix milliseconds, used for age-based collection rather than validity.
     pub(crate) last_used: u64,
     /// Size used for retention. A session or pending entry counts the record and the
-    /// values it holds in RAM. A disk record counts the record and all its payloads.
+    /// values it holds in RAM. A disk record counts the inline cost of its reads and uncompressed payloads.
+    /// Its retention cost stays independent of which other queries share those reads.
     pub(crate) bytes: u64,
 }
 

@@ -21,12 +21,13 @@ use ajika_storage::Database as StorageDatabase;
 
 use super::{
     cache::Memo,
-    record::{QueryId, Record, RecordFooter, RecordHeader, Slot, ValueId},
+    record::{Dependency, QueryId, Record, RecordFooter, RecordHeader, Slot, ValueId},
     value::{Codec, Value},
 };
 use crate::{DatabaseOptions, Error, Lifetime, Result, Retention, Statistics, codec};
 
 mod encoding;
+mod observations;
 mod resident;
 use self::{encoding::PendingValue, resident::ResidentStore};
 
@@ -112,6 +113,7 @@ struct PreparedCheckpoint {
 struct DiskChanges {
     records: Vec<MetadataWrite>,
     removed_values: Vec<ValueId>,
+    released_observations: HashMap<u32, u32>,
     payloads: Vec<PendingValue>,
 }
 
@@ -127,6 +129,7 @@ impl DiskChanges {
         original: Option<&Record>,
     ) -> Result<Arc<Record>> {
         if let Some(previous) = original {
+            previous.count_shared(&mut self.released_observations);
             for (slot, value) in &previous.header.values {
                 if !record.header.values.contains_key(slot) && value.length.is_some() {
                     self.removed_values.push(id.value_id(slot));
@@ -276,7 +279,7 @@ impl Backend {
         // The runtime's record schema has its own version, separate from the storage
         // adapter and the application's persisted query types.
         let mut database =
-            StorageDatabase::open(path, &format!("query-runtime-4:{epoch}"), options.storage)?;
+            StorageDatabase::open(path, &format!("query-runtime-5:{epoch}"), options.storage)?;
         let (interner, inventory) = match Self::load_interner(&mut database) {
             Ok(interner) => {
                 let loaded = Self::load_usage(&database);
@@ -755,6 +758,7 @@ impl Backend {
     ) -> Result<PreparedCheckpoint> {
         let mut prepared = Vec::with_capacity(dirty.len());
         let mut disk = DiskChanges::default();
+        let mut observations = self.observations();
         for &memo in dirty {
             check()?;
             // Evaluation is over. Move the record and its values out of the memo while
@@ -768,6 +772,20 @@ impl Backend {
                 (record, std::mem::take(&mut state.values))
             };
             let mut record = Arc::unwrap_or_clone(record);
+            // A session or pending record can outlive the disk row from which it was
+            // validated. Give it its own observations before any old references are released.
+            // Freshly executed queries already hold their reads inline.
+            if record
+                .dependencies
+                .iter()
+                .any(|dep| matches!(dep, Dependency::Shared(_)))
+            {
+                for dep in Arc::make_mut(&mut record.dependencies) {
+                    if let Dependency::Shared(_) = dep {
+                        *dep = observations.resolve(dep)?.into_owned();
+                    }
+                }
+            }
             record.footer.last_used = now;
             // Saving the exact text that's open in an editor can change a query's lifetime
             // without running it again. Its memo may be missing values that now need to be
@@ -846,15 +864,13 @@ impl Backend {
                     check()?;
                     write.remove_value(&id.0)?;
                 }
-                for record in &disk.records {
-                    check()?;
-                    // Release each encoded record after the writer copies it. Retaining the
-                    // whole batch would keep a second copy of the dependency graph alive while
-                    // payloads are encoded. Publication still waits for the transaction to commit.
-                    let bytes = codec::encode(record.record.as_ref())?;
-                    stats.metadata_writes += 1;
-                    stats.metadata_bytes_written += bytes.len() as u64;
-                    write.set_metadata(&record.id.0, &bytes)?;
+                write.release_shared_metadata(
+                    disk.released_observations
+                        .iter()
+                        .map(|(&id, &count)| (id, count)),
+                )?;
+                for group in disk.records.chunks(4096) {
+                    MetadataWrite::write_group(group, &mut write, stats, check)?;
                 }
                 stats.bytes_written += PendingValue::write_all(
                     &disk.payloads,
@@ -1069,6 +1085,7 @@ impl Backend {
                         .peekable();
                     if changes.peek().is_some() {
                         let mut write = database.begin_write()?;
+                        let mut released = HashMap::new();
                         // Read through the writer so each encoded record can be released before
                         // loading the next. A separate snapshot would prevent exclusive writes.
                         for (id, item) in changes {
@@ -1082,12 +1099,14 @@ impl Backend {
                                         write.remove_value(&id.value_id(slot).0)?;
                                     }
                                 }
+                                record.count_shared(&mut released);
                                 write.remove_metadata(&id.0)?;
                             } else {
                                 record.footer.last_used = item.used;
                                 write.set_metadata(&id.0, &codec::encode(&record)?)?;
                             }
                         }
+                        write.release_shared_metadata(released.into_iter())?;
                         write.commit()?;
                     }
                 }

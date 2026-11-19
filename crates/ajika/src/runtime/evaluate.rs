@@ -476,10 +476,31 @@ impl<'db, S: Services> Db<'db, S> {
         let _span = tracing::trace_span!("ajika.validate", query = %registry.family_name(record.address.family)).entered();
         let mut durability = Durability::High;
         let mut lifetime = Lifetime::Persistent;
+        let mut observations = self.operation.database.backend.observations();
         // Do not inspect later reads after a changed guard. They may belong to an old branch
         // that the new execution will never enter, including an output that no longer exists.
         for dependency in record.dependencies.iter() {
             self.check_cancelled()?;
+            // Another caller may already have checked this exact slot and version. A miss
+            // takes no lock across the recursive call. Parallel misses can both validate it.
+            let shared_id = if let Dependency::Shared(id) = dependency {
+                if let Some(&(child_durability, child_lifetime)) = self
+                    .operation
+                    .checked_observations
+                    .lock()
+                    .expect("checked observations")
+                    .get(id)
+                {
+                    durability = durability.min(child_durability);
+                    lifetime = lifetime.min(child_lifetime);
+                    continue;
+                }
+                Some(*id)
+            } else {
+                None
+            };
+            let resolved = observations.resolve(dependency)?;
+            let dependency = resolved.as_ref();
             let (child_durability, child_lifetime) = match dependency {
                 Dependency::Input(address, observed) => {
                     let Some(input) = registry.stamp(self, address)? else {
@@ -538,7 +559,15 @@ impl<'db, S: Services> Db<'db, S> {
                     }
                     (durability, lifetime)
                 }
+                Dependency::Shared(_) => unreachable!("observation resolved above"),
             };
+            if let Some(id) = shared_id {
+                self.operation
+                    .checked_observations
+                    .lock()
+                    .expect("checked observations")
+                    .insert(id, (child_durability, child_lifetime));
+            }
             durability = durability.min(child_durability);
             lifetime = lifetime.min(child_lifetime);
         }
@@ -620,7 +649,7 @@ impl<'db, S: Services> Db<'db, S> {
                 old_record.expect("equal result has an old version").clone()
             } else {
                 changed = true;
-                ValueRecord::fresh()?
+                ValueRecord::fresh()
             };
             if value.codec.is_some() && record.length.is_none() {
                 // Equality can preserve a version that only lived in the operation
@@ -651,13 +680,24 @@ impl<'db, S: Services> Db<'db, S> {
         // Materializing an evicted syntax value can leave every observation and
         // version unchanged. Keep that operation read-only instead of checkpointing
         // identical metadata merely because a provider had to run again.
-        let dirty = changed
+        let mut dirty = changed
             || previous.is_none_or(|old| {
-                old.dependencies.as_ref() != reads.dependencies
-                    || old.header.values != records
+                old.header.values != records
                     || old.header.durability != reads.durability
                     || old.header.lifetime != reads.lifetime
+                    || old.dependencies.len() != reads.dependencies.len()
             });
+        if let Some(old) = previous
+            && !dirty
+        {
+            let mut observations = self.operation.database.backend.observations();
+            for (saved, fresh) in old.dependencies.iter().zip(&reads.dependencies) {
+                if observations.resolve(saved)?.as_ref() != fresh {
+                    dirty = true;
+                    break;
+                }
+            }
+        }
         let record = Arc::new(Record {
             address: memo.address.clone(),
             dependencies: reads.dependencies.into(),

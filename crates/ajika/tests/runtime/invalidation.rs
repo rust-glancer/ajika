@@ -3,7 +3,9 @@ use std::sync::Arc;
 use ajika::{Database, DatabaseOptions, Output, Retention};
 use anyhow::Result;
 
-use super::{Db, Settings, Sources, declarations, diagnostics, inputs, retention, test_options};
+use super::{
+    Db, Settings, Sources, declarations, diagnostics, inputs, retention, test_options, tree,
+};
 
 #[ajika::query]
 fn repeated_output(db: &Db, output: Output<String>, consumer: u32) -> ajika::Result<String> {
@@ -37,6 +39,57 @@ fn repeated_output_reads_remain_dependencies_in_every_consumer() -> Result<()> {
             .collect::<Vec<_>>();
         assert_eq!(*db.run(parallel_outputs)?, expected);
         assert_eq!(db.statistics().executed, expected_executions, "{text:?}");
+    }
+    Ok(())
+}
+
+#[test]
+fn shared_reads_survive_partial_replacement_and_are_reclaimed_with_the_last_caller() -> Result<()> {
+    let directory = tempfile::tempdir()?;
+    for deferred in [false, true] {
+        let path = directory
+            .path()
+            .join(if deferred { "deferred" } else { "eager" });
+        let options = if deferred {
+            test_options().defer_checkpoints(1024 * 1024)
+        } else {
+            test_options()
+        };
+        // All callers read the same text. Replace only half of them, leaving two different
+        // observations of that input on disk at the same time.
+        for (text, count, executions) in [("old", 12, 12), ("new", 6, 6), ("new", 12, 6)] {
+            let mut db = Database::open(&path, "test", inputs(text), (), options.clone())?;
+            db.run(|db| {
+                for file in 0..count {
+                    assert_eq!(tree(db, file)?.as_str(), format!("{file}:{text}"));
+                }
+                Ok(())
+            })?;
+            assert_eq!(db.statistics().executed, executions);
+            db.collect()?;
+            let disk = db.storage_statistics()?.expect("disk database");
+            assert!(
+                disk.record_bytes + disk.raw_value_bytes < db.statistics().stored_bytes,
+                "the on-disk metadata including the dictionary should be smaller than storing each read inline"
+            );
+        }
+        let mut db = Database::open(
+            &path,
+            "test",
+            inputs("new"),
+            (),
+            DatabaseOptions::new(Retention {
+                max_entries: 0,
+                ..retention()
+            }),
+        )?;
+        assert_eq!(db.collect()?, 12);
+        assert_eq!(
+            db.storage_statistics()?
+                .expect("disk database")
+                .record_bytes,
+            0
+        );
     }
     Ok(())
 }

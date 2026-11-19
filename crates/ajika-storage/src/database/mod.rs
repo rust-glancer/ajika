@@ -22,7 +22,8 @@ use crate::{
     Compression, Error, ErrorKind, Read, Result, Statistics, Write,
     error::ensure,
     format::{
-        self, HEADER, IDENTITIES, InstanceId, PACKS, PackHeader, PackId, PackInfo, RECORDS, VALUES,
+        self, HEADER, IDENTITIES, InstanceId, PACKS, PackHeader, PackId, PackInfo, RECORDS, SHARED,
+        VALUES,
     },
     pack::PackWriter,
 };
@@ -225,7 +226,7 @@ impl Database {
         index: &redb::Database,
         identities: &[Identity<'_>],
     ) -> Result<InstanceId> {
-        let instance = InstanceId(format::new_id()?);
+        let instance = InstanceId(format::new_id());
         let write = index.begin_write()?;
         {
             let mut header = write.open_table(HEADER)?;
@@ -382,6 +383,7 @@ impl Database {
         identities: Option<&[Identity<'_>]>,
     ) -> Result<()> {
         write.delete_table(RECORDS)?;
+        write.delete_table(SHARED)?;
         write.delete_table(VALUES)?;
         write.delete_table(PACKS)?;
         drop(write.open_table(RECORDS)?);

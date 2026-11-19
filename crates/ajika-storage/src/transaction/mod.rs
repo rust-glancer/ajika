@@ -9,6 +9,7 @@ use std::{
     error::Error as _,
     fs::File,
     io,
+    ops::{Bound, Range},
     sync::{Arc, RwLockReadGuard, RwLockWriteGuard, atomic::Ordering},
     time::Instant,
 };
@@ -20,7 +21,7 @@ use crate::{
     error::ensure,
     format::{
         self, FrameHeader, IDENTITIES, Location, PACKS, PackHeader, PackId, PackInfo, RECORDS,
-        VALUES,
+        SHARED, VALUES,
     },
     pack::PackWriter,
     value::INLINE_BYTES,
@@ -44,6 +45,9 @@ pub struct Write<'a> {
     database: &'a Database,
     pub(crate) packs: PackWriter<'a>,
     pub(crate) changed_packs: BTreeMap<PackId, PackInfo>,
+    // An empty range asks the next allocation to find free IDs. None keeps the rest of
+    // this checkpoint inline after two misses. The exclusive end can be one past u32::MAX.
+    shared_ids: Option<Range<u64>>,
     _guard: RwLockWriteGuard<'a, ()>,
 }
 
@@ -84,6 +88,7 @@ impl<'a> Write<'a> {
                 &database.reconciliation_due,
             ),
             changed_packs: BTreeMap::new(),
+            shared_ids: Some(0..0),
             _guard: guard,
         })
     }
@@ -148,6 +153,90 @@ impl<'a> Write<'a> {
 
     pub fn set_metadata(&self, id: &Id, bytes: &[u8]) -> Result<()> {
         self.transaction.open_table(RECORDS)?.insert(id, bytes)?;
+        Ok(())
+    }
+
+    /// Store an immutable fragment referenced by this many records in the checkpoint.
+    /// Returns None if the writer couldn't find a free ID and the caller should store it inline.
+    pub fn share_metadata(&mut self, bytes: &[u8], references: u32) -> Result<Option<u32>> {
+        assert!(references > 0, "shared metadata needs a referring record");
+        let Some(ids) = &mut self.shared_ids else {
+            return Ok(None);
+        };
+        let mut table = self.transaction.open_table(SHARED)?;
+        if ids.is_empty() {
+            let pick = || getrandom::u32().expect("supported platforms provide OS randomness");
+            let Some(free) = Self::free_shared_ids(&table, pick)? else {
+                self.shared_ids = None;
+                return Ok(None);
+            };
+            *ids = free;
+        }
+        let id = u32::try_from(ids.start).expect("free ID fits u32");
+        table.insert(id, (references, bytes))?;
+        ids.start += 1;
+        Ok(Some(id))
+    }
+
+    /// Usually we can issue IDs sequentially after the highest live ID. On overflow, pick a
+    /// random u32 and ask the index for the first live ID at or above it. If we pick 1000
+    /// and the index returns 1400, we can issue `1000..1400` with one lookup. The write
+    /// transaction is exclusive, so that gap is ours to use.
+    ///
+    /// If we land on an occupied ID, try once more, then fall back to inline storage for
+    /// this checkpoint. With 10 million live entries, even the first pick has a 99.77%
+    /// chance of landing in a gap. The odds depend only on how many IDs are live today.
+    fn free_shared_ids(
+        table: &redb::Table<'_, u32, (u32, &[u8])>,
+        mut pick: impl FnMut() -> u32,
+    ) -> Result<Option<Range<u64>>> {
+        let end = u64::from(u32::MAX) + 1;
+        let tail = table
+            .last()?
+            .map_or(0, |(last, _)| u64::from(last.value()) + 1);
+        if tail < end {
+            return Ok(Some(tail..end));
+        }
+
+        for _ in 0..2 {
+            let start = pick();
+            let mut cursor = table.lower_bound(Bound::Included(start))?;
+            let (next_live, _) = cursor.next()?.expect("u32::MAX is live");
+            if start < next_live.value() {
+                return Ok(Some(u64::from(start)..u64::from(next_live.value())));
+            }
+        }
+        Ok(None)
+    }
+
+    /// Release the references owned by replaced or evicted records in this transaction.
+    /// The last release removes the fragment along with its count.
+    pub fn release_shared_metadata(
+        &self,
+        releases: impl Iterator<Item = (u32, u32)>,
+    ) -> Result<()> {
+        let mut releases = releases.peekable();
+        if releases.peek().is_none() {
+            return Ok(());
+        }
+        let mut table = self.transaction.open_table(SHARED)?;
+        for (id, count) in releases {
+            let remaining = {
+                let entry = table
+                    .get(id)?
+                    .ok_or_else(|| Error::invalid_cache("missing shared metadata"))?;
+                let (refs, bytes) = entry.value();
+                let left = refs
+                    .checked_sub(count)
+                    .ok_or_else(|| Error::invalid_cache("invalid shared metadata count"))?;
+                (left > 0).then(|| (left, bytes.to_vec()))
+            };
+            if let Some((left, bytes)) = remaining {
+                table.insert(id, (left, bytes.as_slice()))?;
+            } else {
+                table.remove(id)?;
+            }
+        }
         Ok(())
     }
 
@@ -312,6 +401,15 @@ impl<'a> Read<'a> {
         Ok(table.get(id)?.map(|bytes| bytes.value().to_vec()))
     }
 
+    /// Read one referenced fragment without loading the other fragments in the checkpoint.
+    pub fn shared_metadata(&self, id: u32) -> Result<Vec<u8>> {
+        let table = self.transaction.open_table(SHARED)?;
+        let entry = table
+            .get(id)?
+            .ok_or_else(|| Error::invalid_cache("missing shared metadata"))?;
+        Ok(entry.value().1.to_vec())
+    }
+
     /// Read one value as owned, uncompressed bytes without reading other payloads.
     /// A missing or malformed value reports [`crate::ErrorKind::InvalidCache`].
     pub fn read_value(&self, id: &Id, length: u64) -> Result<Vec<u8>> {
@@ -409,5 +507,40 @@ impl<'a> Read<'a> {
             }
             Ok(())
         }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::{SHARED, Write};
+    use crate::{Database, Options, Result};
+
+    #[test]
+    fn shared_ids_use_the_last_id_then_probe_for_a_free_range() -> Result<()> {
+        let root = tempfile::tempdir()?;
+        let database = Database::open(root.path(), "shared IDs", Options::default())?;
+        let mut write = database.begin_write()?;
+        {
+            // Seed the high end so reaching overflow takes one ordinary allocation.
+            let mut table = write.transaction.open_table(SHARED)?;
+            for id in [1400, u32::MAX - 1] {
+                table.insert(id, (1, b"live".as_slice()))?;
+            }
+        }
+        assert_eq!(write.share_metadata(b"last ID", 1)?, Some(u32::MAX));
+
+        let table = write.transaction.open_table(SHARED)?;
+        for (picks, expected, attempts) in [
+            ([1000, 0], Some(1000..1400), 1),
+            ([1400, 1399], Some(1399..1400), 2),
+            ([u32::MAX, 1400], None, 2),
+        ] {
+            let mut picks = picks.into_iter();
+            let free =
+                Write::free_shared_ids(&table, || picks.next().expect("at most two probes"))?;
+            assert_eq!(free, expected);
+            assert_eq!(2 - picks.len(), attempts);
+        }
+        Ok(())
     }
 }

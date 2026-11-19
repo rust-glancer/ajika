@@ -106,7 +106,8 @@ pub struct Statistics {
     pub header_reads: u64,
     /// Query records written by checkpointing, including metadata-only updates.
     pub metadata_writes: u64,
-    /// Encoded query-record bytes written by checkpointing, excluding index overhead.
+    /// Encoded query rows and newly shared observations written by checkpointing, including
+    /// the IDs and reference counts of new observations. Excludes index page overhead.
     pub metadata_bytes_written: u64,
     /// Values decoded from storage, including old values loaded for equality comparisons.
     pub decoded: u64,
@@ -128,7 +129,8 @@ pub struct Statistics {
     /// Records committed to disk, or retained in a memory database. A disk record still
     /// counts here while a replacement for it waits in RAM.
     pub stored_queries: u64,
-    /// Logical encoded bytes, excluding index overhead and allocator capacity.
+    /// Logical bytes used for retention. Each query counts the inline size of its reads,
+    /// even when several queries share their encoding on disk.
     /// The typed memory backend does not serialize values to produce this counter.
     pub stored_bytes: u64,
     /// Query records waiting for a disk write. Repeated updates to the same query key count once.
