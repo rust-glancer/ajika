@@ -1,5 +1,12 @@
 # Changelog
 
+## [0.2.1](https://github.com/rust-glancer/ajika/compare/v0.2.0...v0.2.1) (2026-11-19)
+
+
+### Features
+
+* More optimizations & better APIs ([#29](https://github.com/rust-glancer/ajika/issues/29)) ([c7d3a5d](https://github.com/rust-glancer/ajika/commit/c7d3a5d8a36177d7b84ca256ecf6fc70d363af9d))
+
 ## [0.2.0](https://github.com/rust-glancer/ajika/compare/v0.1.7...v0.2.0) (2026-11-18)
 
 
